@@ -25,6 +25,7 @@ route/src/
   chain.rs               the four allowlisted bloom:chain reads
   quote.rs               per-venue quoting, ranking, protection
   ops.rs                 operation record + state machine + reconciliation
+  trace.rs               every write leaves a readable trace (record refusals, last-write marker)
   tx.rs swap.rs launch.rs positions.rs wallet.rs   the write/step flows
   host.rs                the only host seam; fake_host.rs under cfg(test)
   route_tests.rs         fake-host tests of every route flow (cfg(test))
@@ -45,7 +46,7 @@ cargo test --manifest-path route/Cargo.toml --locked
 petal build --root .            # or scripts/build.sh (installs the pinned CLI)
 petal check --root .
 wasm-tools component wit petal/tolly/<route>.wasm | grep import
-petal package --root . --out dist/tolly-v0.1.0.petal.tar.gz
+petal package --root . --out dist/tolly-v0.1.1.petal.tar.gz
 bloom petals build . && bloom petals install .    # needs a Bloom daemon
 ```
 
@@ -79,7 +80,8 @@ Expected route count: 21.
   `tx_inspect` state), non-regression of terminal states, idempotency digest.
 - Route flows against the fake host (`route/src/route_tests.rs`): status,
   markets, token detail, buy/sell quotes (V4 best but unsupported, QuoterV2
-  revert, sell normalisation), the buy walk (writes disabled → -2, cap → -3,
+  revert, sell normalisation), the buy walk (writes disabled → -2 and a
+  `failed/writes-disabled` record plus `last_write`, cap → -3,
   approve-then-swap with gross `swapWithToll` and a fresh floor, bound-id
   mismatch → -3, venue pin rules, stage denial and error classification,
   persist failure after stage → `stage_in_flight` → refuse → acknowledge,
@@ -89,8 +91,15 @@ Expected route count: 21.
   completion, launch completion under an API outage, V4 pool-key and
   quote-representation tickets, positions bounds, the B1 chain allowlist on
   every flow (`assert_chain_calls_allowlisted`), bad/oversized/unknown
-  bodies, backend failures, and the secret boundary (no URL/key ever reaches a
-  record or response; no route file references the secret namespace).
+  bodies, backend failures, the write trace (invalid bodies leave a marker
+  and no record; a parsed refusal creates an unbound record that the first
+  valid write binds; refusals on a live or terminal record are appended to
+  a bounded `refusals[]` with the status kept; unrecorded-stage and
+  live-entry refusals; unknown-token and prod refusals; sell ownership via
+  planned decimals; launch refusals; a no-op re-POST refreshes
+  `last_write_ms`), and the secret boundary (no URL/key ever reaches a
+  record, a marker or a response; no route file references the secret
+  namespace).
 
 No test contacts a network or a Bloom daemon.
 
@@ -111,6 +120,14 @@ No test contacts a network or a Bloom daemon.
 - **D6** Writes gated by the USER's runtime setting `tolly_writes = "enabled"`
   (default disabled; any Bloom user can flip it — it is not a founder gate) plus
   `MAX_OP_USDC = 250` on buys and on the QUOTED USDC output of sells.
+- **D13** Every write leaves a readable trace (`trace.rs`). Bloom delivers
+  mounted Petal writes asynchronously and never returns the route's answer
+  to the writer, so a refused write persists its outcome: the operation
+  record is created/advanced to `failed` (or, when the record is live or
+  terminal, the refusal is appended to its bounded `refusals[]` and the
+  status kept), and a per-wallet `tolly/lastwrite/<wallet>` marker is
+  written on every write, parsed or not. The route response is unchanged;
+  the successful path stages exactly as before.
 - **D7** Wallet address via `vfs_read("wallets/{wallet}/address")`.
 - **D8** No logo pinning; the agent supplies a pinned `imageURI`.
 - **D9** `max_fee_per_gas` / `max_priority_fee_per_gas` left `None` (the
@@ -128,6 +145,17 @@ No test contacts a network or a Bloom daemon.
 
 ## Host facts the implementation relies on
 
+- Mounted writes are asynchronous (verified on Bloom v0.2.1 / Ubuntu 24.04,
+  2026-09-10): a `write()` to a Petal route on the NFS mount returns success
+  to the writer (exit 0, empty stderr) before the route runs; the route's
+  error is logged by the daemon as
+  `WARN mount.adapter.async_command_outcome_deferred path=… error="…"` and
+  nothing about it is visible on the mount. `bloom vfs write` returns the
+  same error synchronously (exit 1). The SDK makes this unavoidable:
+  `write_spec()` is `RouteSpec::writable().caps(..).ttl(None).write_async(true)`
+  and every builder except `caps()` is crate-private, so a Petal cannot
+  declare a synchronous writable route. Hence D13 and the "Read after every
+  write" rule in AGENTS.md.
 - `bloom:chain` allowlist is exactly `eth_chainId`, `eth_getBalance`,
   `eth_getCode`, `eth_call` at the latest block. No receipts, no gas
   estimation, no block number are requested; funding uses a fixed native
@@ -146,10 +174,11 @@ No test contacts a network or a Bloom daemon.
   (different calldata), hence the `stage_in_flight` marker.
 - `store_put_new` on an existing key is reported as a message containing
   "already exists" (not a status); `ops::claim` treats it as "exists".
-- Store keys: `tolly/ops/<wallet>/<id>` (records) and
+- Store keys: `tolly/ops/<wallet>/<id>` (records),
   `tolly/live/<wallet>/<kind>/<subject>` (the live-entry index that the M1
-  check reads instead of scanning records). Both live in the `state`
-  namespace; nothing secret is stored.
+  check reads instead of scanning records) and `tolly/lastwrite/<wallet>`
+  (the last-write marker, D13). All live in the `state` namespace; nothing
+  secret is stored.
 - Runtime settings read through `bloom:env`: `tolly_writes` (the write
   gate) and `tolly_network` (`stage` default; `prod` refused until D10).
 - Route cache TTLs are the SDK's: quotes `http_read_spec(2_000)` (2 s, a
@@ -193,9 +222,10 @@ No test contacts a network or a Bloom daemon.
 
 - V4 execution (TollyV4Router / UniversalRouter / Permit2 paths).
 - Prod manifest release; `markets/all.json` (scope=all with the spam filter).
-- Runtime VFS smoke tests (`bloom vfs ls/cat/write`) and `bloom petals
-  build/install`: no daemon in this environment. Before the first live write
-  verify once that `-2 writes-disabled` is returned synchronously through
-  `bloom vfs write` (`write_spec` implies `write_async`).
+- Runtime smoke on a daemon from this environment: none here. On a Bloom
+  v0.2.1 host the petal installs and its read routes work on the mounted
+  VFS (status/markets/tokens/quote verified 2026-09-10); the write path's
+  asynchronous delivery is what D13 answers. A mounted write smoke against
+  `operations/<id>.json` / `last_write` after this release is still to do.
 - Release workflow (`release-petal.yml`, `expected-route-count: 21`) and the
   GitHub extraction (`git subtree split -P petals/tolly`).
