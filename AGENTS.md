@@ -26,10 +26,23 @@ logged by the daemon and never returned to the writer. A write that
    and `record_effect` / `note` say whether and where that outcome landed
    (`created`, `failed`, `refusal_appended`, `accepted`, or `none` with the
    reason: body did not parse, invalid `operationId`, `operationId` bound to
-   a different request or kind, record could not be matched);
+   a different request or kind, record could not be matched). The same read
+   RECONCILES this route's in-flight operations for this wallet against
+   Bloom's outbox and the chain (`reconciled[]`: `id`, `status`, `step`,
+   `next_action`, `changed`, `error_code`, `reconcile_error`; at most 8,
+   newest first, `reconcile_truncated: true` when more exist) and persists
+   every advance; `recent` shows the post-reconcile state;
 2. if `record` is set, read `wallets/<wallet>/operations/<operationId>.json`:
    `status`, `error`, `next_action`, `last_write_ms`, and, on a record that
    was already live or terminal, the newest refusals in `refusals[]`.
+
+The record file is a projection of the stored record, cached for up to ~5 s,
+and it NEVER inspects the outbox: Bloom lets an outbox entry be inspected
+only by the route that staged it, so `operations/<id>.json` cannot learn
+that the owner confirmed, that the transaction mined or that it was
+cancelled. Its `status` moves only when you read the route file that staged
+it (step 1); reading the record alone, however often, keeps showing the last
+persisted state. Its `refresh` field repeats this.
 
 Do not read the record alone: a record can exist and be untouched by your
 write (`record_effect: none`), and a stale `staged` or `failed` there would
@@ -46,10 +59,10 @@ a silent write as a staged transaction.
 | `tokens/<address>.json` | identity, `provenance` (`pad`/`external`), `venues[]` with `execution` support, quote paths. Any lowercase address works, listed or not | — |
 | `quote/<address>/buy/<usdc>.json` | best-execution BUY quote at a USDC size (e.g. `25`, `0.5`) | — |
 | `quote/<address>/sell/<amount>.json` | best-execution SELL quote at a token size | — |
-| `wallets/<wallet>/buy.json` | body schema, limits, recent buys, `last_write` | BuyRequest |
-| `wallets/<wallet>/sell.json` | body schema, limits, recent sells, `last_write` | SellRequest |
-| `wallets/<wallet>/launch.json` | body schema, pad address, limits, recent launches, `last_write` | LaunchRequest |
-| `wallets/<wallet>/operations/<operationId>.json` | the operation record, reconciled on every read | — |
+| `wallets/<wallet>/buy.json` | body schema, limits, `last_write`; reconciles this wallet's in-flight buys against the outbox (`reconciled[]`), then `recent` | BuyRequest |
+| `wallets/<wallet>/sell.json` | body schema, limits, `last_write`; reconciles this wallet's in-flight sells (`reconciled[]`), then `recent` | SellRequest |
+| `wallets/<wallet>/launch.json` | body schema, pad address, limits, `last_write`; reconciles this wallet's in-flight launches (`reconciled[]`), then `recent` | LaunchRequest |
+| `wallets/<wallet>/operations/<operationId>.json` | the stored operation record as is (cached ~5 s; never inspects the outbox — read the route file that staged it first, see `refresh`) | — |
 | `wallets/<wallet>/positions.json` | native + ERC-20 USDC and the tokens this wallet's operations touched | — |
 
 `<wallet>` is a Bloom wallet id (the directory name under `/bloom/wallets/`),
@@ -160,14 +173,18 @@ created ──stage──▶ staged ──owner confirms──▶ broadcast ─�
 |---|---|---|
 | `created` | id claimed, nothing staged yet | `repost`; `inspect` when `stage_in_flight` is set (see "Unrecorded stage") |
 | `staged` | one entry pending in Bloom's outbox | `confirm_in_bloom` — the owner writes to `confirm_path` (`/bloom/wallets/<wallet>/chains/arc/outbox/pending/<outbox_id>/confirm`) |
-| `broadcast` | sent, no receipt yet | `wait` — read the record again |
-| `confirmed` | mined successfully | step `approve`: `repost` (POST the same body to stage the swap/createToken). step `swap`/`create`: `wait` for completion evidence |
+| `broadcast` | sent, no receipt yet | `wait` — read the route file that staged it again (it reconciles), then the record |
+| `confirmed` | mined successfully | step `approve`: `repost` (POST the same body to stage the swap/createToken). step `swap`/`create`: `wait` for completion evidence, gathered by the route file's read |
 | `completed` | domain evidence recorded in `result` | `none` |
 | `failed` | `error.code`, `error.message`, `error.retryable` — from the host (a reverted or cancelled entry) or a recorded refusal (see below) | `retry` (re-POST) when retryable, else `none` |
-| `unknown` | Bloom no longer lets the Petal inspect the outbox entry | `inspect` — look at the wallet's outbox in Bloom; nothing is re-staged |
+| `unknown` | the outbox entry could not be inspected from the route that staged it: it is gone (pruned), or Bloom denied the inspection (the entry was staged by another route or another build of this Petal — an anomaly, `note` says which) | `inspect` — look at the wallet's outbox in Bloom; nothing is re-staged |
 
 Every record also carries `last_write_ms` (the last write that addressed
-it, accepted or refused) and `refusals[]` (below).
+it, accepted or refused), `refusals[]` (below) and `refresh` (where to read
+to make it current). Every transition after `staged` is made by the READ of
+the route file that staged the entry (`buy.json`, `sell.json`,
+`launch.json`), never by reading the record: Bloom binds outbox inspection
+to the staging route.
 
 ### Recorded refusals
 
@@ -230,8 +247,12 @@ Completion evidence (`result.method`):
   `created_block` equals the receipt block (`result.token`, `result.pool`);
   `creator-index-identity` when the block is unavailable. Until the index
   lists it — or while the TOLLY API is unreachable — the record stays
-  `confirmed` with a `note` (`completion evidence unavailable: …`); the read
-  never fails because evidence is missing.
+  `confirmed` with a `note` (`completion evidence unavailable: …`); the
+  route file's read never fails because evidence is missing.
+
+Evidence is gathered when the route file that staged the operation is read
+(`buy.json` for buys, `sell.json` for sells, `launch.json` for launches);
+`operations/<id>.json` only shows what that read persisted.
 
 A recorded receipt is final: once `txs[].outcome` is `success`, the entry is
 not inspected again and the host forgetting it (pruned outbox, `Denied`)
@@ -242,8 +263,9 @@ cannot regress the record to `unknown`.
 - `staged`, `broadcast`: a re-POST is a no-op refresh. Never expect a second
   entry; if the pending entry is stale (the quote is old — SwapRouter02 and the
   TOLLY routers have no deadline, only `amountOutMinimum` protects you) ask the
-  owner to cancel it in Bloom (`…/outbox/pending/<id>/cancel`) and re-POST
-  after it reports `failed`/`cancelled`.
+  owner to cancel it in Bloom (`…/outbox/pending/<id>/cancel`), read the
+  route file (its `reconciled[]` turns the record `failed`/`cancelled`) and
+  re-POST after the record reports it.
 - `failed` with `retryable: true` — exactly these codes: `reverted`,
   `expired-or-dropped`, `cancelled`, `stage-failed`, `quote-unavailable`,
   `fee-check-unavailable`, `venue-changed`, `venue-unsupported`,
@@ -301,7 +323,19 @@ the marker describes, then re-POST the same body with
 was confirmed and mined, the money moved even though `txs[]` never listed it
 — account for it before staging again.
 
-### Listing freshness
+### Freshness
+
+`operations/<id>.json` is served with a 5 s cache and is a projection of the
+stored record: it never inspects the outbox, the chain or the TOLLY API.
+Bloom binds outbox inspection to the route that staged the entry, so the
+record advances only when `buy.json` / `sell.json` / `launch.json` is read:
+that read reconciles up to 8 in-flight operations of its kind for the
+wallet (`status` `staged`/`broadcast`/`confirmed`/`unknown`, or carrying
+`stage_in_flight`), newest first by `updated_ms`, persists every advance
+and lists them in `reconciled[]` (`reconcile_truncated: true` when more
+were waiting — read again). An operation older than the eight newest
+in-flight ones is reconciled once those settle. The write routes are not
+cached, so every read of them reconciles.
 
 `operations/` (the directory listing) is served with the host's 30 s cache:
 a new operation may take up to 30 s to appear in `ls`, though its file is

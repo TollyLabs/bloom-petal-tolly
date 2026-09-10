@@ -24,7 +24,7 @@ route/src/
   api.rs                 fixed API targets + projections (venuesForToken port)
   chain.rs               the four allowlisted bloom:chain reads
   quote.rs               per-venue quoting, ranking, protection
-  ops.rs                 operation record + state machine + reconciliation
+  ops.rs                 operation record + state machine + reconciliation (run from the staging route's read)
   trace.rs               every write leaves a readable trace (record refusals, last-write marker)
   tx.rs swap.rs launch.rs positions.rs wallet.rs   the write/step flows
   host.rs                the only host seam; fake_host.rs under cfg(test)
@@ -46,7 +46,7 @@ cargo test --manifest-path route/Cargo.toml --locked
 petal build --root .            # or scripts/build.sh (installs the pinned CLI)
 petal check --root .
 wasm-tools component wit petal/tolly/<route>.wasm | grep import
-petal package --root . --out dist/tolly-v0.1.1.petal.tar.gz
+petal package --root . --out dist/tolly-v0.1.2.petal.tar.gz
 bloom petals build . && bloom petals install .    # needs a Bloom daemon
 ```
 
@@ -87,6 +87,13 @@ Expected route count: 21.
   persist failure after stage → `stage_in_flight` → refuse → acknowledge,
   claim race, pending dedupe, completion by balance delta, zero-delta buys
   stay `confirmed`, a forgotten outbox entry never regresses a receipt),
+  reconciliation from the staging route (`operations/<id>.json` is a pure
+  store projection: no `tx_inspect`, chain, HTTP or save, and a `refresh`
+  hint; a `buy.json` read reconciles a staged buy to `confirmed`/`completed`,
+  persists it and lists it in `reconciled[]` with `changed: true`; a sell is
+  not reconciled by the buy route; the 8-operation bound with
+  `reconcile_truncated`; an invalid network setting skips reconciliation
+  with a `reconcile_error` and never inspects),
   sell "all", sell completion net of gas, launch with a frozen salt and index
   completion, launch completion under an API outage, V4 pool-key and
   quote-representation tickets, positions bounds, the B1 chain allowlist on
@@ -147,6 +154,18 @@ No test contacts a network or a Bloom daemon.
 - **D12** `tx_confirm` is never called: under `agent_autonomy = under_policy`
   it would broadcast without a prompt. The owner confirms at
   `/bloom/wallets/<wallet>/chains/arc/outbox/pending/<outbox_id>/confirm`.
+- **D14** Reconciliation runs from the READ of the route that staged the
+  entry (`ops::route_read_side`, called by `buy.json`, `sell.json` and
+  `launch.json`), never from the record: Bloom binds outbox inspection to
+  the staging route (host fact below), and a side-effecting read would be
+  unreadable on the mount (host fact below). `operations/[id].json` is a
+  pure store projection (`account_read_spec`, caps `bloom:store` only, 5 s
+  cache) with a `refresh` hint. Each route read reconciles at most
+  `RECONCILE_MAX_OPS = 8` in-flight operations of its kind, newest first, out
+  of the `recent` scan, persists every advance, and reports `reconciled[]` /
+  `reconcile_truncated`; `recent` is projected after reconciliation. The
+  write handlers reconcile only what they did before (their own record and
+  `live_conflict`).
 
 ## Host facts the implementation relies on
 
@@ -161,6 +180,37 @@ No test contacts a network or a Bloom daemon.
   and every builder except `caps()` is crate-private, so a Petal cannot
   declare a synchronous writable route. Hence D13 and the "Read after every
   write" rule in AGENTS.md.
+- Side-effecting reads are unreadable on the NFS mount (verified on Bloom
+  v0.2.1 against the daemon and its source, 2026-09-11):
+  `bloom-mount/src/adapter.rs` `should_render_for_attrs` returns false when
+  `vfs.is_read_side_effecting(path)`, so GETATTR reports `st_size = 0` and
+  `cat` short-circuits at 0 bytes; only `bloom vfs cat` (CLI/IPC) returns
+  the body. The SDK's `chain_read_spec()` sets `side_effecting_read(true)`;
+  `write_spec()`, `account_read_spec()`, `store_read_spec()` and
+  `http_read_spec()` leave it false. Parameterized routes (`[wallet]`,
+  `[id]`) get an install-time `side_effecting_read = true` ceiling, but the
+  route's own spec narrows it at lookup (`bloom-petals/src/runner.rs`
+  `petal_route_effective_metadata`), so a parameterized route with a
+  non-side-effecting spec renders. Measured on the live daemon (petal
+  v0.1.0): `wallets/main/buy.json` (write spec) stat 1577 bytes, `cat`
+  works; `wallets/main/operations/buy-tolly-1.json` (then `chain_read_spec`)
+  stat 0 / `cat` 0 bytes while `bloom vfs cat` returned 3012 bytes. Hence no
+  route uses `chain_read_spec` (enforced by `check-route-architecture.sh`).
+- Outbox inspection is bound to the STAGING ROUTE, not just the package
+  (`bloom-daemon/src/lib.rs`): `tx_inspect` and `tx_confirm` compute
+  `origin = petal_execution_origin(context)` = `ExecutionOrigin { petal_id,
+  petal_digest = package_hash, route_id = context.route_id }` and answer
+  `HostError::Denied("outbox entry was not staged by this trusted Petal")`
+  when `entry.staged.resolved_execution_origin() != origin`. `route_id` is
+  the route file, so an entry staged by `wallets/[wallet]/buy.json` can be
+  inspected only from that route's handlers (read or write). Before D14 the
+  record's read was always denied and every record degraded to `unknown`
+  with "outbox inspection: denied". `tx_inspect` is read-only on the host
+  side (test `daemon_petal_outbox_inspection_is_read_only_and_origin_bound`).
+  A `Denied` from the staging route is now an anomaly (a rebuilt package
+  hash, an entry from another route); `ops::classify_error` keeps it a
+  non-regressing `unknown` with the note "outbox inspection: <reason> (entry
+  not staged by this route?)".
 - `bloom:chain` allowlist is exactly `eth_chainId`, `eth_getBalance`,
   `eth_getCode`, `eth_call` at the latest block. No receipts, no gas
   estimation, no block number are requested; funding uses a fixed native
@@ -170,7 +220,10 @@ No test contacts a network or a Bloom daemon.
 - `tx_inspect.state` is the receipt `outcome` (`success`|`reverted`) when a
   receipt exists, else `pending|sent|success|reverted|failed|cancelled`;
   `Denied`/`NotFound` map to a non-regressing `unknown` — and once a
-  `success` outcome is recorded the entry is never inspected again.
+  `success` outcome is recorded the entry is never inspected again. Every
+  `tx_inspect` this Petal makes runs from the handlers of the route that
+  staged the entry (the route's read via D14, its write via the record
+  refresh and `live_conflict`).
 - `tx_stage` errors reach the guest as `backend: stage EVM outbox: <engine
   error>`; the SDK's `host_err` turns any message containing "denied" into
   `HostStatus::Denied` (→ `policy-denied`), `valuation unavailable: …` is
@@ -187,10 +240,10 @@ No test contacts a network or a Bloom daemon.
 - Runtime settings read through `bloom:env`: `tolly_writes` (the write
   gate) and `tolly_network` (`stage` default; `prod` refused until D10).
 - Route cache TTLs are the SDK's: quotes `http_read_spec(2_000)` (2 s, a
-  pure read — not the audited side-effecting chain spec, which only
-  `operations/[id].json` uses because that read rewrites the store),
-  `positions.json` `account_read_spec()` (5 s), `operations/` listing and
-  `wallets/` the 30 s store default.
+  pure read), `positions.json` and `operations/[id].json`
+  `account_read_spec()` (5 s; the record is a pure store projection, D14),
+  `operations/` listing and `wallets/` the 30 s store default; the writable
+  routes (`write_spec`) are uncached, so every read of them reconciles.
 - Wallet ids may contain `/` per the SDK grammar; this Petal additionally
   requires a single safe segment ≤ 64 bytes (store keys).
 - The `[wallet]` param is the Bloom wallet id; `[usdc]`/`[amount]`/`[id]`
@@ -208,8 +261,10 @@ No test contacts a network or a Bloom daemon.
   fee by less than one 6-dec unit. The Petal computes the fee once in the
   ERC-20 unit the router charges and scales `net` for native-quote V4 quoting;
   `fee::tests` pins both facts.
-- `operations/[id].json` also declares `bloom:http` (launch completion reads
-  the creator index, D11).
+- `operations/[id].json` declares only `bloom:store`: launch completion
+  (the creator index, D11) and swap completion (balance deltas) are read by
+  the staging route's read, which already holds `bloom:http`, `bloom:chain`
+  and `bloom:tx.outbox` (D14).
 - Sell completion is reported as `balance_delta_net_of_gas`: on Arc the
   ERC-20 USDC view is the gas balance, and the receipt exposes no `gas_used`.
 - A V4 venue whose quote representation (native 18 / ERC-20 6) differs from
@@ -229,8 +284,11 @@ No test contacts a network or a Bloom daemon.
 - Prod manifest release; `markets/all.json` (scope=all with the spam filter).
 - Runtime smoke on a daemon from this environment: none here. On a Bloom
   v0.2.1 host the petal installs and its read routes work on the mounted
-  VFS (status/markets/tokens/quote verified 2026-09-10); the write path's
-  asynchronous delivery is what D13 answers. A mounted write smoke against
-  `operations/<id>.json` / `last_write` after this release is still to do.
+  VFS (status/markets/tokens/quote verified 2026-09-10; the 2026-09-11 stat
+  measurements above were taken on petal v0.1.0); the write path's
+  asynchronous delivery is what D13 answers, and the two host facts above
+  are what D14 answers. A mounted smoke of the post-write flow after this
+  release (write → read `buy.json` → `reconciled[]` → read the record, and
+  `stat` of the record showing a non-zero size) is still to do.
 - Release workflow (`release-petal.yml`, `expected-route-count: 21`) and the
   GitHub extraction (`git subtree split -P petals/tolly`).
