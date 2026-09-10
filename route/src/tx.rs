@@ -7,9 +7,16 @@
 //! back to a 500k gas limit when its own estimate fails, so a bad calldata
 //! would otherwise burn gas reverting on-chain.
 //!
-//! `tx_confirm` is deliberately never called (D12): under a wallet policy of
-//! `agent_autonomy = under_policy` it would broadcast without a prompt. The
-//! owner confirms by writing to `confirm_path`
+//! `tx_confirm` is deliberately never called (D12). Outbox confirms are
+//! passkey-per-transaction by construction on Bloom v0.2.1: every confirm
+//! mints a single-use Exact approval bound to {bloom-machine,
+//! transaction.confirm} and requires the owner's passkey (bloom-tx
+//! `tx_engine.rs` `triad_sign_evm_payload`, ~2864-2875 and ~3981-4006); the
+//! local `agent_autonomy` branch is non-gating (~3527-3547) and
+//! `bloom_proto::Policy` has no config loader, so no daemon setting turns a
+//! confirm into an unprompted broadcast. A `tx_confirm` from this Petal would
+//! therefore gain nothing, and with `acknowledge_warnings = true` it would
+//! bypass simulation. The owner confirms by writing to `confirm_path`
 //! (`wallets/<wallet>/chains/arc/outbox/pending/<outbox_id>/confirm`, relative
 //! to the Bloom mount root, see `MOUNT_NOTE`).
 

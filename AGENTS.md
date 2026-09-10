@@ -1,7 +1,9 @@
 # TOLLY Petal — agent operating contract
 
 This Petal exposes TOLLY (launchpad + DEX on Arc, chain id 5042, chain key
-`arc`) as files under `/bloom/petals/tolly/`. It reads the TOLLY public API
+`arc`) as files under `petals/tolly/` at the Bloom mount root — the owner's
+mount point, `~/bloom` on a default Linux install, never `/bloom` (see
+"Paths"). It reads the TOLLY public API
 (stage host) and the chain through Bloom, and it STAGES transactions into the
 wallet owner's Bloom outbox. It never signs, never broadcasts, never calls
 `confirm`. The owner confirms every transaction in Bloom.
@@ -65,8 +67,19 @@ a silent write as a staged transaction.
 | `wallets/<wallet>/operations/<operationId>.json` | the stored operation record as is (cached ~5 s; never inspects the outbox — read the route file that staged it first, see `refresh`) | — |
 | `wallets/<wallet>/positions.json` | native + ERC-20 USDC and the tokens this wallet's operations touched | — |
 
-`<wallet>` is a Bloom wallet id (the directory name under `/bloom/wallets/`),
-never a `0x` address. `<address>` is a lowercase `0x` token address.
+`<wallet>` is a Bloom wallet id (the directory name under `wallets/` at the
+mount root), never a `0x` address. `<address>` is a lowercase `0x` token
+address.
+
+**Mount-relative paths.** Every path in this document and every path the
+Petal emits — `confirm_path` on a record and in its `txs[]`, the outbox
+directory in an `unrecorded-stage` message — is RELATIVE to the Bloom mount
+root. Prefix the owner's mount point yourself: `~/bloom`
+(`/home/<user>/bloom`) on a default Linux install, or wherever the owner's
+fstab mounts Bloom. It is never `/bloom`: `mount_path = "/bloom"` in
+`~/.bloom/config.toml` is informational only, and a literal `/bloom/...`
+gets ENOENT. Every emitted `confirm_path` carries a `confirm_path_note`
+repeating this, and a staged record carries `cancel_hint`.
 
 ## Read before you write
 
@@ -172,7 +185,7 @@ created ──stage──▶ staged ──owner confirms──▶ broadcast ─�
 | status | meaning | next_action |
 |---|---|---|
 | `created` | id claimed, nothing staged yet | `repost`; `inspect` when `stage_in_flight` is set (see "Unrecorded stage") |
-| `staged` | one entry pending in Bloom's outbox | `confirm_in_bloom` — the owner writes to `confirm_path` (`/bloom/wallets/<wallet>/chains/arc/outbox/pending/<outbox_id>/confirm`) |
+| `staged` | one entry pending in Bloom's outbox | `confirm_in_bloom` — the owner writes to `confirm_path` (`wallets/<wallet>/chains/arc/outbox/pending/<outbox_id>/confirm`, RELATIVE to the Bloom mount root: prefix the owner's mount point, `~/bloom` by default, never `/bloom`; `confirm_path_note` says so and `cancel_hint` says how to cancel instead) |
 | `broadcast` | sent, no receipt yet | `wait` — read the route file that staged it again (it reconciles), then the record |
 | `confirmed` | mined successfully | step `approve`: `repost` (POST the same body to stage the swap/createToken). step `swap`/`create`: `wait` for completion evidence, gathered by the route file's read |
 | `completed` | domain evidence recorded in `result` | `none` |
@@ -228,7 +241,8 @@ operation — one write, one read, then the next — and never re-POST while a
 previous write to the same id has not been read back.
 
 `step` ∈ `approve | swap | create`. `txs[]` keeps every attempt (audit):
-`outbox_id`, `confirm_path`, `outbox_state`, `tx_hash`, `outcome`,
+`outbox_id`, `confirm_path` (mount-relative), `confirm_path_note`,
+`outbox_state`, `tx_hash`, `outcome`,
 `block_number`, `revert_reason`, `plan_md` (Bloom's rendered plan, truncated),
 `superseded`.
 
@@ -318,7 +332,8 @@ calldata, and two live entries for one intent is the failure this Petal is
 built to prevent.
 
 To proceed: inspect the wallet's outbox in Bloom
-(`/bloom/wallets/<wallet>/chains/arc/outbox/`), confirm or cancel the entry
+(`wallets/<wallet>/chains/arc/outbox/` under the mount root, `~/bloom` by
+default), confirm or cancel the entry
 the marker describes, then re-POST the same body with
 `acknowledge_unrecorded_stage: true`. The marker moves to
 `unrecorded_stages[]` (audit) and the step is staged afresh. If the entry
@@ -329,6 +344,9 @@ was confirmed and mined, the money moved even though `txs[]` never listed it
 
 `operations/<id>.json` is served with a 5 s cache and is a projection of the
 stored record: it never inspects the outbox, the chain or the TOLLY API.
+Its `confirm_path` (and every `txs[].confirm_path`) is RELATIVE to the Bloom
+mount root: prefix the owner's mount point (`~/bloom` by default, never
+`/bloom`) before opening it; `confirm_path_note` on the record repeats this.
 Bloom binds outbox inspection to the route that staged the entry, so the
 record advances only when `buy.json` / `sell.json` / `launch.json` is read:
 that read reconciles up to 8 in-flight operations of its kind for the

@@ -86,7 +86,10 @@ Expected route count: 21.
   mismatch → -3, venue pin rules, stage denial and error classification,
   persist failure after stage → `stage_in_flight` → refuse → acknowledge,
   claim race, pending dedupe, completion by balance delta, zero-delta buys
-  stay `confirmed`, a forgotten outbox entry never regresses a receipt),
+  stay `confirmed`, a forgotten outbox entry never regresses a receipt, a
+  staged record's `confirm_path` is mount-relative with `confirm_path_note`
+  and `cancel_hint` beside it, nothing in the record is `/bloom`-rooted, and
+  the notes leave with the path once the entry is broadcast),
   reconciliation from the staging route (`operations/<id>.json` is a pure
   store projection: no `tx_inspect`, chain, HTTP or save, and a `refresh`
   hint; a `buy.json` read reconciles a staged buy to `confirmed`/`completed`,
@@ -151,9 +154,19 @@ No test contacts a network or a Bloom daemon.
 - **D11** No `/api/swaps` widening: buy/sell completion = balance delta of the
   output token (frozen at stage vs read after success); launch completion =
   `GET /api/tokens?creator=<wallet>&scope=ours` matched on `created_block`.
-- **D12** `tx_confirm` is never called: under `agent_autonomy = under_policy`
-  it would broadcast without a prompt. The owner confirms at
-  `/bloom/wallets/<wallet>/chains/arc/outbox/pending/<outbox_id>/confirm`.
+- **D12** `tx_confirm` is never called: it would gain nothing and could
+  only lose the simulation. Outbox confirms are passkey-per-transaction by
+  construction on Bloom v0.2.1 (host fact below): every confirm mints a
+  single-use Exact approval bound to {bloom-machine, transaction.confirm}
+  and requires the owner's passkey, and no daemon setting (there is no
+  gating `agent_autonomy`, and `bloom_proto::Policy` has no config loader)
+  turns that into an unprompted broadcast. The one thing a `bloom:tx`
+  `tx_confirm` from the Petal could change is with
+  `acknowledge_warnings = true`, which would bypass simulation. The owner
+  confirms by writing to the entry's confirm file, `confirm_path`
+  (`wallets/<wallet>/chains/arc/outbox/pending/<outbox_id>/confirm`,
+  RELATIVE to the Bloom mount root, host fact below); `confirm_path_note`
+  and `cancel_hint` travel with it on the record.
 - **D14** Reconciliation runs from the READ of the route that staged the
   entry (`ops::route_read_side`, called by `buy.json`, `sell.json` and
   `launch.json`), never from the record: Bloom binds outbox inspection to
@@ -235,6 +248,28 @@ No test contacts a network or a Bloom daemon.
   broadcast" arm) and moves the entry to `outbox/failed/`. Verified
   2026-09-11: entry `0002-71268` cancelled that way; the next `buy.json`
   read reconciled the record to `failed` / `cancelled` / `retryable: true`.
+- The Bloom mount is NOT at `/bloom`. `mount_path = "/bloom"` in
+  `~/.bloom/config.toml` is informational only (bloom-proto `config.rs`
+  reads it into the config and nothing mounts there); the kernel mount is
+  wherever the owner's fstab puts it, `~/bloom` (`/home/<user>/bloom`) on
+  the reference Bloom v0.2.1 / Ubuntu 24.04 install (verified 2026-09-11).
+  Hence every path this Petal emits (`confirm_path` on the record and in
+  `txs[]`, the outbox directory in the `unrecorded-stage` message, the
+  wallet-id refusal) is RELATIVE to the mount root and every `confirm_path`
+  carries a `confirm_path_note` saying so; an agent that follows a literal
+  `/bloom/...` gets ENOENT. Documented in AGENTS.md "Paths".
+- Outbox confirms are passkey-per-transaction by construction: on Bloom
+  v0.2.1 every outbox confirm mints a single-use Exact approval bound to
+  {bloom-machine, transaction.confirm} and requires the owner's passkey
+  (bloom-tx `tx_engine.rs` `triad_sign_evm_payload`, ~2864-2875 and
+  ~3981-4006). The local autonomy branch there is non-gating (~3527-3547)
+  and `bloom_proto::Policy` has no config loader at all, so a daemon setting
+  `agent_autonomy = "under_policy"` does not exist as a gate and could not
+  let `tx_confirm` broadcast without a prompt (an earlier D12 wording
+  claimed it could; that was wrong). Calling `bloom:tx` `tx_confirm` from
+  the Petal therefore gains nothing, and with `acknowledge_warnings = true`
+  it would bypass simulation. Hence D12: the owner confirms by writing to
+  the entry's confirm file.
 - `bloom:chain` allowlist is exactly `eth_chainId`, `eth_getBalance`,
   `eth_getCode`, `eth_call` at the latest block. No receipts, no gas
   estimation, no block number are requested; funding uses a fixed native
