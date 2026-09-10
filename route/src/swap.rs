@@ -445,6 +445,9 @@ fn advance(wallet: &str, intent: Intent, echo: Value, trace: &mut WriteTrace) ->
             "operation-id-bound: operationId already bound to a different operation kind",
         );
     }
+    // A record created by a refusal carries the network the owner asked for
+    // at the time; every write past the gates records the resolved one.
+    op.network = network.name().into();
     op.last_write_ms = Some(now);
 
     // Reconcile what the host says about the latest attempt.

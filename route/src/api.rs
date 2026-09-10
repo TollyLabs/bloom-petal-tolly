@@ -75,18 +75,16 @@ impl Network {
     }
 }
 
-/// The network the owner asked for, as written in `tolly_network` (or
-/// `stage`), for records of writes refused before `current()` resolved it.
+/// The network the owner asked for in `tolly_network`, for records of
+/// writes refused before `current()` resolved it: `stage` | `prod` |
+/// `invalid` (the setting names no network) | `unavailable` (the setting
+/// could not be read). Never the raw setting text.
 pub fn requested_network_name() -> String {
     match host::runtime_setting(NETWORK_SETTING) {
-        Ok(Some(value)) => {
-            let value = value.trim().to_ascii_lowercase();
-            let mut end = value.len().min(16);
-            while !value.is_char_boundary(end) {
-                end -= 1;
-            }
-            value[..end].to_owned()
-        }
+        Ok(Some(value)) => match Network::parse(&value) {
+            Ok(network) => network.name().to_owned(),
+            Err(_) => "invalid".to_owned(),
+        },
         Ok(None) => Network::Stage.name().to_owned(),
         Err(_) => "unavailable".to_owned(),
     }

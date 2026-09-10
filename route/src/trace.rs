@@ -7,9 +7,10 @@
 //! refusal that lives only in the response is therefore invisible. This
 //! module makes every outcome discoverable through reads:
 //!
-//! - the operation record (`tolly/ops/{wallet}/{id}`) is created or advanced
-//!   to `failed` for a refused write whose body parsed and whose `operationId`
-//!   is unclaimed or owned by the same economic tuple; a record whose truth
+//! - the operation record (`tolly/ops/{wallet}/{id}`) is created (unbound)
+//!   or advanced to `failed` for a refused write whose body parsed and whose
+//!   `operationId` is unclaimed, unbound, or owned by the same economic
+//!   tuple (or bound but with nothing staged); a record whose truth
 //!   lives elsewhere (a live outbox entry, a mined step, a completed or
 //!   terminal operation, an unrecorded stage) keeps its status and gets the
 //!   refusal appended to its bounded `refusals[]`;
@@ -38,7 +39,7 @@ const MAX_MESSAGE_CHARS: usize = 512;
 const MAX_ID_ECHO_CHARS: usize = 96;
 
 /// What an agent reads to learn how a write ended when no record says so.
-pub const WRITE_SEMANTICS: &str = "On the mounted filesystem write() always succeeds: Bloom delivers Petal writes asynchronously and the route's answer is not returned to the writer. Read operations/<operationId>.json right after every write; if it does not exist, read last_write here. Via `bloom vfs write` the same errors are returned synchronously.";
+pub const WRITE_SEMANTICS: &str = "On the mounted filesystem write() always succeeds: Bloom delivers Petal writes asynchronously and the route's answer is not returned to the writer. Right after every write read last_write here first: check body_sha256 against the bytes you wrote, then record_effect/note say whether and where the outcome landed; if record is set, read that operations/<operationId>.json. Via `bloom vfs write` the same errors are returned synchronously.";
 
 pub fn marker_key(wallet: &str) -> String {
     format!("{LASTWRITE_PREFIX}{wallet}")
@@ -201,6 +202,13 @@ impl WriteTrace {
         if op.is_unbound() {
             return Ownership::Owned;
         }
+        // A bound record with nothing staged and nothing in flight protects
+        // nothing: a refusal whose tuple cannot be computed here (a decimal
+        // sell before the record planned the token's decimals, an unparseable
+        // token or amount) still lands on it. A known, different tuple stays
+        // foreign: the flow refuses it `operation-id-bound` and the marker
+        // says so.
+        let nothing_staged = op.txs.is_empty() && op.stage_in_flight.is_none();
         let digest = match &self.tuple {
             Tuple::Known(d) => d.clone(),
             Tuple::SellNeedsDecimals {
@@ -212,8 +220,10 @@ impl WriteTrace {
                 .and_then(|decimals| parse_decimal(amount_human, decimals).ok())
             {
                 Some(raw) => swap_digest(Kind::Sell, *token, Some(raw)),
+                None if nothing_staged => return Ownership::Owned,
                 None => return Ownership::Unverifiable,
             },
+            Tuple::Unknown if nothing_staged => return Ownership::Owned,
             Tuple::Unknown => return Ownership::Unverifiable,
         };
         if digest == op.request_sha256 {
@@ -377,11 +387,10 @@ impl WriteTrace {
                 Err(e) => return (None, "none", Some(format!("no record: {e}"))),
             },
         };
-        let digest = match &self.tuple {
-            Tuple::Known(d) => d.clone(),
-            // Unbound: the first write past validation binds it.
-            _ => String::new(),
-        };
+        // A refusal never binds, even when the tuple is known offline: there
+        // is nothing staged to protect, and binding would make the only
+        // remedy (a corrected body under the same id) `operation-id-bound`.
+        // The first write past validation and the gates binds the record.
         let network = self
             .network
             .clone()
@@ -392,7 +401,7 @@ impl WriteTrace {
             address,
             self.kind,
             &network,
-            digest,
+            String::new(),
             self.echo.clone().unwrap_or(Value::Null),
             self.now,
         );

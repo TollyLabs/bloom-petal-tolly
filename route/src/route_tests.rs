@@ -417,6 +417,7 @@ fn writes_are_denied_until_the_owner_enables_them() {
     assert_eq!(rec["request"]["operationId"], "buy-1");
     assert_eq!(rec["txs"], json!([]));
     assert_eq!(rec["refusals"], json!([]));
+    assert_eq!(rec["request_sha256"], "", "a refusal never binds");
     let lw = last_write();
     assert_eq!(lw["schema"], "tolly.lastwrite.v1");
     assert_eq!(lw["route"], "buy");
@@ -714,6 +715,106 @@ fn unknown_token_and_prod_refusals_are_recorded() {
     let rec = record("buy-prod");
     assert_eq!(rec["error"]["code"], "prod-disabled");
     assert_eq!(rec["network"], "prod", "the network the owner asked for");
+    assert_eq!(rec["request_sha256"], "");
+    // The setting goes back to stage: the same id binds, stages, and the
+    // record's network is the one the stage actually ran on.
+    fake_host::with(|h| {
+        h.set_setting(crate::api::NETWORK_SETTING, "stage");
+        h.now_ms = NOW + 1;
+    });
+    let r = route_buy(
+        WALLET,
+        &buy_body("buy-prod", "25", json!({"allow_worse_venue": true})),
+    );
+    assert_eq!(r, DispatchResponse::Write, "{}", message(&r));
+    let rec = record("buy-prod");
+    assert_eq!(rec["status"], "staged");
+    assert_eq!(rec["network"], "stage", "the network the stage ran on");
+    assert_eq!(rec["request_sha256"].as_str().unwrap().len(), 64);
+
+    // A setting that names no network is recorded as `invalid`, never as
+    // the owner's raw text.
+    let mut host = host_for_barc_buy();
+    host.set_setting(crate::api::NETWORK_SETTING, "mainnet");
+    fake_host::install(host);
+    assert_eq!(
+        code(&route_buy(WALLET, &buy_body("buy-net", "25", json!({})))),
+        -3
+    );
+    let rec = record("buy-net");
+    assert_eq!(rec["error"]["code"], "network-setting-invalid");
+    assert_eq!(rec["error"]["retryable"], true);
+    assert_eq!(rec["network"], "invalid");
+}
+
+#[test]
+fn a_validation_refusal_with_a_known_tuple_does_not_bind_the_id() {
+    fake_host::install(host_for_barc_buy());
+    // token + amount parse (the tuple is computable offline), but the body
+    // fails validation: the record is created unbound.
+    assert_eq!(
+        code(&route_buy(
+            WALLET,
+            &buy_body("buy-v", "10", json!({"slippage_bps": 99999}))
+        )),
+        -3
+    );
+    let rec = record("buy-v");
+    assert_eq!(rec["status"], "failed");
+    assert_eq!(rec["error"]["code"], "invalid-request");
+    assert_eq!(rec["next_action"], "retry");
+    assert_eq!(rec["request_sha256"], "", "a refusal never binds");
+    // A cap refusal (past validation, before the gates) does not bind either.
+    assert_eq!(
+        code(&route_buy(WALLET, &buy_body("buy-v", "300", json!({})))),
+        -3
+    );
+    let rec = record("buy-v");
+    assert_eq!(rec["error"]["code"], "cap-exceeded");
+    assert_eq!(rec["request_sha256"], "");
+    assert_eq!(last_write()["record_effect"], "failed");
+    // The corrected body keeps the id: a DIFFERENT amount stages under it.
+    fake_host::with(|h| h.now_ms = NOW + 1);
+    let r = route_buy(
+        WALLET,
+        &buy_body("buy-v", "25", json!({"allow_worse_venue": true})),
+    );
+    assert_eq!(r, DispatchResponse::Write, "{}", message(&r));
+    let rec = record("buy-v");
+    assert_eq!(rec["status"], "staged");
+    assert_eq!(rec["last_write_ms"], NOW + 1);
+    assert_eq!(rec["request_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(last_write()["record_effect"], "accepted");
+    fake_host::with(|h| assert_eq!(h.staged.len(), 1));
+}
+
+#[test]
+fn a_sell_refused_before_its_decimals_were_planned_still_lands_on_the_record() {
+    // Balance below the amount: the flow records `insufficient-funds`
+    // (bound) before `plan.decimals` is set.
+    fake_host::install(host_for_barc_sell(1_000_000_000_000_000_000));
+    let body = serde_json::to_vec(
+        &json!({ "operationId": "sell-e", "token": addr_hex(barc()), "amount": "5000" }),
+    )
+    .unwrap();
+    assert_eq!(code(&route_sell(WALLET, &body)), -3);
+    let rec = record("sell-e");
+    assert_eq!(rec["error"]["code"], "insufficient-funds");
+    assert_eq!(rec["request_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(rec["plan"]["decimals"], Value::Null);
+    assert_eq!(rec["txs"], json!([]));
+    // A gate refusal cannot compute the tuple here, but nothing is staged:
+    // the refusal replaces the stale error instead of hiding in the marker.
+    fake_host::with(|h| {
+        h.set_setting(policy::WRITES_SETTING, "no");
+        h.now_ms = NOW + 3;
+    });
+    assert_eq!(code(&route_sell(WALLET, &body)), -2);
+    let rec = record("sell-e");
+    assert_eq!(rec["status"], "failed");
+    assert_eq!(rec["error"]["code"], "writes-disabled");
+    assert_eq!(rec["last_write_ms"], NOW + 3);
+    assert_eq!(last_write()["record_effect"], "failed");
 }
 
 #[test]
@@ -762,7 +863,7 @@ fn sell_refusals_match_the_record_through_its_planned_decimals() {
 }
 
 #[test]
-fn launch_refusals_are_recorded_and_bound_by_the_first_stage() {
+fn launch_refusals_are_recorded_unbound_and_bound_by_the_first_stage() {
     let mut host = host_for_launch();
     host.set_setting(policy::WRITES_SETTING, "no");
     fake_host::install(host);
@@ -775,30 +876,54 @@ fn launch_refusals_are_recorded_and_bound_by_the_first_stage() {
     assert_eq!(rec["status"], "failed");
     assert_eq!(rec["error"]["code"], "writes-disabled");
     assert_eq!(
-        rec["request_sha256"].as_str().unwrap().len(),
-        64,
-        "the launch tuple is known offline"
+        rec["request_sha256"], "",
+        "the launch tuple is known offline, but a refusal never binds"
     );
     assert_eq!(last_write()["route"], "launch");
-    // A different launch under the same id is foreign even now.
+    // A different launch under the same id is not foreign yet: the refusal
+    // lands on the unbound record.
     let mut other: Value = serde_json::from_slice(&launch_body("launch-r", "0")).unwrap();
     other["symbol"] = json!("OTHER");
+    fake_host::with(|h| h.now_ms = NOW + 1);
     assert_eq!(
         code(&route_launch(WALLET, &serde_json::to_vec(&other).unwrap())),
         -2
     );
-    assert_eq!(record("launch-r")["error"]["code"], "writes-disabled");
-    assert_eq!(last_write()["record_effect"], "none");
-    // Enabled: stages.
+    let rec = record("launch-r");
+    assert_eq!(rec["error"]["code"], "writes-disabled");
+    assert_eq!(rec["last_write_ms"], NOW + 1);
+    assert_eq!(rec["request_sha256"], "");
+    assert_eq!(last_write()["record_effect"], "failed");
+    // Enabled: the first stage binds.
     fake_host::with(|h| {
         h.set_setting(policy::WRITES_SETTING, policy::WRITES_ENABLED_VALUE);
+        h.now_ms = NOW + 2;
     });
     let r = route_launch(WALLET, &launch_body("launch-r", "0"));
     assert_eq!(r, DispatchResponse::Write, "{}", message(&r));
+    let rec = record("launch-r");
+    assert_eq!(rec["status"], "staged");
+    assert_eq!(rec["network"], "stage");
+    let bound = rec["request_sha256"].as_str().unwrap().to_owned();
+    assert_eq!(bound.len(), 64);
+    // Now the other launch is foreign: refused, record untouched.
+    fake_host::with(|h| h.now_ms = NOW + 3);
+    assert_eq!(
+        code(&route_launch(WALLET, &serde_json::to_vec(&other).unwrap())),
+        -3
+    );
+    let rec = record("launch-r");
+    assert_eq!(rec["status"], "staged");
+    assert_eq!(rec["request_sha256"], bound);
+    assert_eq!(rec["last_write_ms"], NOW + 2);
+    assert_eq!(last_write()["error"]["code"], "operation-id-bound");
+    assert_eq!(last_write()["record_effect"], "none");
     assert_eq!(record("launch-r")["status"], "staged");
     let doc = read_json(crate::launch::launch_description(WALLET));
-    assert_eq!(doc["last_write"]["outcome"], "accepted");
+    assert_eq!(doc["last_write"]["outcome"], "refused");
+    assert_eq!(doc["last_write"]["error"]["code"], "operation-id-bound");
     assert_eq!(doc["recent"]["operations"][0]["id"], "launch-r");
+    assert_eq!(doc["recent"]["operations"][0]["status"], "staged");
 }
 
 #[test]
