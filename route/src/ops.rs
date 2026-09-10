@@ -2,10 +2,14 @@
 //! machine.
 //!
 //! One write advances an operation by AT MOST one staged transaction. A write
-//! never claims completion: the record is reconciled on every read from the
-//! host's `tx_inspect` (critique B3 mapping) and domain evidence (critique
-//! B1/D11: a token balance delta for swaps, the creator's launch index for
-//! launches), never from receipt logs, which `bloom:chain` cannot serve.
+//! never claims completion: the record is reconciled from the host's
+//! `tx_inspect` (critique B3 mapping) and domain evidence (critique B1/D11: a
+//! token balance delta for swaps, the creator's launch index for launches),
+//! never from receipt logs, which `bloom:chain` cannot serve. Reconciliation
+//! runs from the READ of the route that staged the entry (`buy.json`,
+//! `sell.json`, `launch.json`; see `route_read_side`): Bloom binds outbox
+//! inspection to the staging route, so `operations/<id>.json` is a pure
+//! projection of the stored record (`read_operation`).
 //!
 //! Vocabulary (`status`): `created` (id claimed, nothing staged), `staged`
 //! (entry pending in Bloom's outbox, the owner confirms), `broadcast` (sent,
@@ -27,7 +31,7 @@ use crate::api::{ApiRoute, Network, fetch_json, launch_rows};
 use crate::chain;
 use crate::constants::{CHAIN, USDC, USDC_ERC20_DECIMALS};
 use crate::host;
-use crate::policy::OPS_SCAN_MAX_OPS;
+use crate::policy::{OPS_SCAN_MAX_OPS, RECONCILE_MAX_OPS};
 use crate::sanitize_host_error;
 use crate::wallet::check_wallet_id;
 
@@ -612,8 +616,12 @@ pub fn classify(inspection: &OutboxInspection) -> Inspected {
     }
 }
 
-/// `tx_inspect` errors: `Denied` (staged by another package) and `NotFound`
-/// (entry gone) map to a non-regressing `unknown`, never to `failed`.
+/// `tx_inspect` errors: `Denied` and `NotFound` (entry gone) map to a
+/// non-regressing `unknown`, never to `failed`. The host binds inspection to
+/// the execution origin that staged the entry (petal id, package hash AND
+/// route id), and every inspection here runs from the staging route's read,
+/// so a `Denied` is an anomaly (a package re-hash, an entry staged by another
+/// route or build), which the note says.
 pub fn classify_error(error: &SdkError) -> Inspected {
     Inspected {
         state: TxState::Unknown,
@@ -621,7 +629,7 @@ pub fn classify_error(error: &SdkError) -> Inspected {
         tx_hash: None,
         block_number: None,
         revert_reason: Some(format!(
-            "outbox inspection: {}",
+            "outbox inspection: {} (entry not staged by this route?)",
             sanitize_host_error(&error.message())
         )),
     }
@@ -892,29 +900,39 @@ pub fn reconcile(op: &mut Operation, network: Network, now_ms: u64) -> Result<bo
     Ok(changed)
 }
 
-/// Read one operation, reconciling and persisting any advance.
-pub fn read_operation(wallet: &str, id: &str, network: Network) -> DispatchResponse {
+/// Read one operation: the stored record, unchanged, plus a `refresh` hint.
+///
+/// A pure store projection: no `tx_inspect` (Bloom binds outbox inspection
+/// to the route that staged the entry and would answer `Denied` here), no
+/// chain or HTTP read, no save. Served under the 5 s account cache; the
+/// staging route's read (`route_read_side`) is what advances the record.
+pub fn read_operation(wallet: &str, id: &str) -> DispatchResponse {
     if let Err(response) = check_wallet_id(wallet) {
         return response;
     }
     if let Err(e) = validate_id(id) {
         return petal::error(-3, e);
     }
-    let mut op = match load(wallet, id) {
+    let op = match load(wallet, id) {
         Ok(Some(op)) => op,
         Ok(None) => return petal::error(-1, "no such operation"),
         Err(e) => return petal::error(-4, e),
     };
-    match reconcile(&mut op, network, host::now_ms()) {
-        Ok(true) => {
-            if let Err(e) = save(&op) {
-                return petal::error(-4, e);
-            }
-        }
-        Ok(false) => {}
-        Err(e) => return petal::error(-4, e),
-    }
-    petal::read_json_value(&op)
+    let mut doc = match serde_json::to_value(&op) {
+        Ok(Value::Object(map)) => map,
+        Ok(_) | Err(_) => return petal::error(-4, "operation record serialize"),
+    };
+    doc.insert("refresh".into(), Value::String(refresh_hint(&op)));
+    petal::read_json_value(&Value::Object(doc))
+}
+
+/// Where an agent goes to make this record current.
+fn refresh_hint(op: &Operation) -> String {
+    format!(
+        "this file is a cached projection of the stored record (up to ~5 s stale) and never inspects the outbox: outbox inspection is bound to the staging route, so read wallets/{}/{}.json to reconcile this record (its `reconciled` lists what changed), then re-read this file",
+        op.wallet,
+        op.kind.name()
+    )
 }
 
 /// Why another operation blocks a new stage for the same subject.
@@ -975,31 +993,127 @@ pub fn live_conflict(
     Ok(None)
 }
 
-/// Compact projection of recent operations for the writable routes' read side.
-pub fn recent_summary(wallet: &str, kind: Kind, max: usize) -> Value {
-    match recent(wallet, Some(kind), max) {
-        Ok(recent) => json!({
-            "operations": recent
-                .ops
-                .into_iter()
-                .map(|op| {
-                    json!({
-                        "id": op.id,
-                        "status": op.status,
-                        "step": op.step,
-                        "next_action": op.next_action,
-                        "error_code": op.error.as_ref().map(|e| e.code.clone()),
-                        "updated_ms": op.updated_ms,
-                        "last_write_ms": op.last_write_ms,
-                        "file": format!("operations/{}.json", op.id),
-                    })
-                })
-                .collect::<Vec<_>>(),
-            "scanned": recent.scanned,
-            "scan_truncated": recent.truncated,
-        }),
-        Err(e) => json!({ "error": e }),
+/// Whether a read of the staging route should ask the host about this
+/// operation: an outbox entry may be live, a mined step awaits completion
+/// evidence, or a stage was never recorded.
+pub fn needs_reconcile(op: &Operation) -> bool {
+    op.stage_in_flight.is_some()
+        || matches!(
+            op.status,
+            Status::Staged | Status::Broadcast | Status::Confirmed | Status::Unknown
+        )
+}
+
+/// The read side of a writable route, after reconciliation.
+pub struct RouteReadSide {
+    /// One entry per operation this read reconciled (`id`, `status`, `step`,
+    /// `next_action`, `changed`, `error_code`, `reconcile_error`, `file`).
+    pub reconciled: Vec<Value>,
+    /// More in-flight operations exist than this read reconciled.
+    pub truncated: bool,
+    /// The `recent` projection, from the post-reconcile records.
+    pub recent: Value,
+}
+
+/// Reconcile this route's in-flight operations of `kind` against Bloom's
+/// outbox and domain evidence, persist every advance, then project the
+/// newest `recent_max` operations from what was persisted.
+///
+/// This runs from the READ of `buy.json` / `sell.json` / `launch.json` and
+/// nowhere else: the host compares the outbox entry's execution origin
+/// (petal id, package hash, route id) with the caller's and answers `Denied`
+/// from any other route, so `operations/<id>.json` cannot inspect. Bounded to
+/// `RECONCILE_MAX_OPS` candidates, newest first by `updated_ms`, out of the
+/// `recent` scan (itself bounded to `OPS_SCAN_MAX_OPS` records).
+pub fn route_read_side(wallet: &str, kind: Kind, recent_max: usize) -> RouteReadSide {
+    let mut recent = match recent(wallet, Some(kind), OPS_SCAN_MAX_OPS) {
+        Ok(recent) => recent,
+        Err(e) => {
+            return RouteReadSide {
+                reconciled: Vec::new(),
+                truncated: false,
+                recent: json!({ "error": e }),
+            };
+        }
+    };
+    let network = Network::current().map_err(|response| match response {
+        DispatchResponse::Error { message, .. } => message,
+        DispatchResponse::Write | DispatchResponse::Read(_) => "network unavailable".into(),
+    });
+    let now = host::now_ms();
+    let candidates: Vec<usize> = recent
+        .ops
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| needs_reconcile(op))
+        .map(|(index, _)| index)
+        .collect();
+    let truncated = recent.truncated || candidates.len() > RECONCILE_MAX_OPS;
+    let mut reconciled = Vec::with_capacity(candidates.len().min(RECONCILE_MAX_OPS));
+    for index in candidates.into_iter().take(RECONCILE_MAX_OPS) {
+        let op = &mut recent.ops[index];
+        let before = op.clone();
+        // A change counts only once it is persisted: on any failure the
+        // in-memory record goes back to what the store holds.
+        let (changed, error) = match &network {
+            Ok(network) => match reconcile(op, *network, now) {
+                Ok(true) => match save(op) {
+                    Ok(()) => (true, None),
+                    Err(e) => {
+                        *op = before;
+                        (false, Some(e))
+                    }
+                },
+                Ok(false) => (false, None),
+                Err(e) => {
+                    *op = before;
+                    (false, Some(e))
+                }
+            },
+            Err(e) => (false, Some(format!("not reconciled: {e}"))),
+        };
+        reconciled.push(json!({
+            "id": op.id,
+            "status": op.status,
+            "step": op.step,
+            "next_action": op.next_action,
+            "changed": changed,
+            "error_code": op.error.as_ref().map(|e| e.code.clone()),
+            "reconcile_error": error,
+            "file": format!("operations/{}.json", op.id),
+        }));
     }
+    recent.ops.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms));
+    recent.ops.truncate(recent_max);
+    RouteReadSide {
+        reconciled,
+        truncated,
+        recent: recent_projection(recent),
+    }
+}
+
+/// Compact projection of recent operations for the writable routes' read side.
+fn recent_projection(recent: Recent) -> Value {
+    json!({
+        "operations": recent
+            .ops
+            .into_iter()
+            .map(|op| {
+                json!({
+                    "id": op.id,
+                    "status": op.status,
+                    "step": op.step,
+                    "next_action": op.next_action,
+                    "error_code": op.error.as_ref().map(|e| e.code.clone()),
+                    "updated_ms": op.updated_ms,
+                    "last_write_ms": op.last_write_ms,
+                    "file": format!("operations/{}.json", op.id),
+                })
+            })
+            .collect::<Vec<_>>(),
+        "scanned": recent.scanned,
+        "scan_truncated": recent.truncated,
+    })
 }
 
 #[cfg(test)]
@@ -1156,6 +1270,13 @@ mod tests {
         );
         let denied = classify_error(&SdkError::Host(HostStatus::Denied));
         assert_eq!(denied.state, TxState::Unknown);
+        assert!(
+            denied
+                .revert_reason
+                .as_deref()
+                .unwrap()
+                .contains("(entry not staged by this route?)")
+        );
     }
 
     #[test]

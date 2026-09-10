@@ -47,6 +47,11 @@ pub const POSITIONS_MAX_TOKENS: usize = 32;
 /// M1) does not scan: it reads the `tolly/live/` index.
 pub const OPS_SCAN_MAX_OPS: usize = 1_000;
 
+/// Most in-flight operations one read of a writable route (`buy.json`,
+/// `sell.json`, `launch.json`) reconciles against Bloom's outbox
+/// (`reconciled[]`, newest first); more report `reconcile_truncated: true`.
+pub const RECONCILE_MAX_OPS: usize = 8;
+
 /// Runtime setting that enables writes. Lives in the user's
 /// `[petals.runtime.tolly.values]`; any Bloom user can flip it.
 pub const WRITES_SETTING: &str = "tolly_writes";

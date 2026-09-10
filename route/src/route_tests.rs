@@ -12,7 +12,7 @@ use crate::api::{ApiRoute, Network, fetch_json, status_document, token_detail};
 use crate::constants::{MULTI_ROUTER, PAD, QUOTER_V2, SWAP_ROUTER02, USDC, V4_QUOTER};
 use crate::fake_host::{self, FakeHost};
 use crate::fee;
-use crate::launch::route_launch;
+use crate::launch::{launch_description, route_launch};
 use crate::ops::{self, Kind, NextAction, Status, Step};
 use crate::policy;
 use crate::positions::positions_document;
@@ -103,6 +103,57 @@ fn last_write() -> Value {
 }
 fn word_ret(value: U256) -> Vec<u8> {
     value.to_be_bytes::<32>().to_vec()
+}
+/// Reconcile through the read of the route that staged the operation (the
+/// host binds outbox inspection to that route), then read the record file,
+/// which is a pure projection of what that read persisted.
+fn reconciled_record(kind: Kind, id: &str) -> Value {
+    let doc = read_json(match kind {
+        Kind::Buy => buy_description(WALLET),
+        Kind::Sell => sell_description(WALLET),
+        Kind::Launch => launch_description(WALLET),
+    });
+    assert!(doc["reconciled"].is_array(), "{doc}");
+    read_json(ops::read_operation(WALLET, id))
+}
+/// A staged swap-step operation seeded straight into the store, its outbox
+/// entry still to be scripted by the test.
+fn seeded_staged(kind: Kind, id: &str, outbox_id: &str, updated_ms: u64) -> ops::Operation {
+    let mut op = ops::Operation::new(
+        id,
+        WALLET,
+        wallet_address(),
+        kind,
+        Network::Stage.name(),
+        "d".into(),
+        json!({}),
+        updated_ms,
+    );
+    op.plan.token = Some(addr_hex(barc()));
+    op.plan.decimals = Some(18);
+    op.txs.push(ops::TxEntry {
+        role: Step::Swap,
+        to: addr_hex(MULTI_ROUTER),
+        outbox_id: outbox_id.into(),
+        confirm_path: crate::tx::confirm_path(WALLET, outbox_id),
+        staged_ms: updated_ms,
+        outbox_state: "pending".into(),
+        tx_hash: None,
+        outcome: None,
+        block_number: None,
+        revert_reason: None,
+        superseded: false,
+        attempt_params: json!({}),
+        spender: None,
+        amount_raw: Some("1".into()),
+        balance_before_raw: Some("0".into()),
+        plan_md: String::new(),
+    });
+    op.status = Status::Staged;
+    op.step = Some(Step::Swap);
+    op.finalize_next_action();
+    op.confirm_path = Some(crate::tx::confirm_path(WALLET, outbox_id));
+    op
 }
 
 /// Gross 25 USDC, external token: fee 50_000, net 24_950_000.
@@ -1177,7 +1228,8 @@ fn buy_walk_approve_then_swap_with_gross_and_fresh_floor() {
     assert_eq!(rec["txs"][1]["balance_before_raw"], "0");
     assert_eq!(rec["plan"]["amount_out_minimum_raw"], floor.to_string());
 
-    // 5. Swap mined: the read reconciles to confirmed, then completes from the balance delta.
+    // 5. Swap mined: the buy.json read reconciles to confirmed, then completes
+    //    from the balance delta; the record file projects what it persisted.
     fake_host::with(|h| {
         h.set_outbox(
             "ob-2",
@@ -1192,7 +1244,7 @@ fn buy_walk_approve_then_swap_with_gross_and_fresh_floor() {
             Ok(serde_json::to_string(&format!("0x{:064x}", V3_500_OUT)).unwrap()),
         );
     });
-    let doc = read_json(ops::read_operation(WALLET, "buy-1", Network::Stage));
+    let doc = reconciled_record(Kind::Buy, "buy-1");
     assert_eq!(doc["status"], "completed");
     assert_eq!(doc["next_action"], "none");
     assert_eq!(doc["result"]["method"], "balance_delta");
@@ -1205,10 +1257,7 @@ fn buy_walk_approve_then_swap_with_gross_and_fresh_floor() {
         assert_eq!(h.staged.len(), 2);
         h.set_outbox("ob-2", "pending", None, None);
     });
-    assert_eq!(
-        read_json(ops::read_operation(WALLET, "buy-1", Network::Stage))["status"],
-        "completed"
-    );
+    assert_eq!(reconciled_record(Kind::Buy, "buy-1")["status"], "completed");
     fake_host::with(|h| h.assert_chain_calls_allowlisted());
 }
 
@@ -1637,7 +1686,7 @@ fn one_live_entry_per_wallet_and_token() {
         &buy_body("buy-b", "10", json!({"allow_worse_venue": true})),
     );
     assert_eq!(r, DispatchResponse::Write, "{}", message(&r));
-    let a = read_json(ops::read_operation(WALLET, "buy-a", Network::Stage));
+    let a = reconciled_record(Kind::Buy, "buy-a");
     assert_eq!(a["status"], "failed");
     assert_eq!(a["error"]["code"], "cancelled");
     assert_eq!(a["next_action"], "retry");
@@ -1664,7 +1713,7 @@ fn reverted_swap_is_retried_with_a_superseded_attempt() {
     fake_host::with(|h| {
         h.set_outbox("ob-1", "reverted", Some("0xc3"), Some(&json!({"outcome": "reverted", "tx_hash": "0xc3", "block_number": 5, "revert_reason": "Too little received"})));
     });
-    let doc = read_json(ops::read_operation(WALLET, "buy-r", Network::Stage));
+    let doc = reconciled_record(Kind::Buy, "buy-r");
     assert_eq!(doc["status"], "failed");
     assert_eq!(doc["error"]["code"], "reverted");
     assert_eq!(doc["error"]["message"], "Too little received");
@@ -1708,7 +1757,7 @@ fn confirmed_swaps_never_regress_when_the_outbox_forgets_them() {
     });
     // Mined, but the BARC balance still reads 0 (scripted): a buy without a
     // visible output stays `confirmed`, it is never promoted on a zero delta.
-    let doc = read_json(ops::read_operation(WALLET, "buy-c", Network::Stage));
+    let doc = reconciled_record(Kind::Buy, "buy-c");
     assert_eq!(doc["status"], "confirmed");
     assert_eq!(doc["result"], Value::Null);
     assert!(doc["note"].as_str().unwrap().contains("did not increase"));
@@ -1723,7 +1772,7 @@ fn confirmed_swaps_never_regress_when_the_outbox_forgets_them() {
             Ok(serde_json::to_string(&format!("0x{:064x}", V3_500_OUT)).unwrap()),
         );
     });
-    let doc = read_json(ops::read_operation(WALLET, "buy-c", Network::Stage));
+    let doc = reconciled_record(Kind::Buy, "buy-c");
     assert_eq!(doc["status"], "completed");
     assert_eq!(doc["result"]["method"], "balance_delta");
     assert_eq!(doc["result"]["net_of_gas"], false);
@@ -1788,7 +1837,7 @@ fn sell_completion_is_labelled_net_of_gas_and_completes_at_zero_delta() {
             Some(&json!({"outcome": "success", "tx_hash": "0x99", "block_number": 3})),
         );
     });
-    let doc = read_json(ops::read_operation(WALLET, "sell-n", Network::Stage));
+    let doc = reconciled_record(Kind::Sell, "sell-n");
     assert_eq!(doc["status"], "completed");
     assert_eq!(doc["result"]["method"], "balance_delta_net_of_gas");
     assert_eq!(doc["result"]["net_of_gas"], true);
@@ -1852,7 +1901,7 @@ fn unknown_outbox_entries_never_regress_or_restage() {
     fake_host::with(|h| {
         h.remove_outbox("ob-1");
     });
-    let doc = read_json(ops::read_operation(WALLET, "buy-u", Network::Stage));
+    let doc = reconciled_record(Kind::Buy, "buy-u");
     assert_eq!(doc["status"], "unknown");
     assert_eq!(doc["next_action"], "inspect");
     assert_eq!(doc["error"], Value::Null);
@@ -1877,9 +1926,266 @@ fn buy_description_lists_recent_operations_and_the_gate() {
     assert_eq!(doc["recent"]["operations"][0]["status"], "staged");
     assert_eq!(doc["recent"]["scanned"], 1);
     assert_eq!(doc["recent"]["scan_truncated"], false);
+    assert_eq!(doc["reconciled"][0]["id"], "buy-d");
+    assert_eq!(doc["reconciled"][0]["status"], "staged");
+    assert_eq!(doc["reconciled"][0]["changed"], false);
+    assert_eq!(doc["reconcile_truncated"], false);
+    fake_host::with(|h| assert_eq!(h.inspect_calls, vec!["ob-1".to_string()]));
     assert!(doc["body"]["acknowledge_unrecorded_stage"].is_string());
     assert_eq!(ops::list_ids(WALLET).unwrap(), vec!["buy-d".to_string()]);
     assert_eq!(ops::list_wallets().unwrap(), vec![WALLET.to_string()]);
+}
+
+// ---- reconciliation lives on the staging route ----
+
+#[test]
+fn operation_record_read_is_a_pure_store_projection() {
+    fake_host::install(host_for_barc_buy());
+    let body = buy_body("buy-p", "25", json!({"allow_worse_venue": true}));
+    assert_eq!(route_buy(WALLET, &body), DispatchResponse::Write);
+    assert_eq!(record("buy-p")["status"], "staged");
+    // The owner confirmed and the approve mined; the record file must not
+    // notice: it reads the store and nothing else.
+    let (writes, inspects, chains, https) = fake_host::with(|h| {
+        h.set_outbox(
+            "ob-1",
+            "success",
+            Some("0xa1"),
+            Some(&json!({"outcome": "success", "tx_hash": "0xa1", "block_number": 20185400})),
+        );
+        (
+            h.store_writes(),
+            h.inspect_calls.len(),
+            h.chain_calls.len(),
+            h.http_calls.len(),
+        )
+    });
+    let doc = read_json(ops::read_operation(WALLET, "buy-p"));
+    assert_eq!(doc["schema"], "tolly.operation.v1");
+    assert_eq!(doc["status"], "staged", "the projection never advances");
+    assert_eq!(doc["txs"][0]["outcome"], Value::Null);
+    let refresh = doc["refresh"].as_str().expect("refresh hint");
+    assert!(refresh.contains("wallets/main/buy.json"), "{refresh}");
+    assert!(refresh.contains("cached projection"), "{refresh}");
+    fake_host::with(|h| {
+        assert_eq!(h.store_writes(), writes, "a record read never saves");
+        assert_eq!(h.inspect_calls.len(), inspects, "never inspects the outbox");
+        assert_eq!(h.chain_calls.len(), chains, "never reads the chain");
+        assert_eq!(h.http_calls.len(), https, "never reaches the API");
+    });
+    assert_eq!(record("buy-p")["status"], "staged");
+    // The staging route's read is what advances and persists it.
+    let doc = read_json(buy_description(WALLET));
+    let entry = &doc["reconciled"][0];
+    assert_eq!(entry["id"], "buy-p");
+    assert_eq!(entry["status"], "confirmed");
+    assert_eq!(entry["step"], "approve");
+    assert_eq!(entry["next_action"], "repost");
+    assert_eq!(entry["changed"], true);
+    assert_eq!(entry["error_code"], Value::Null);
+    assert_eq!(entry["reconcile_error"], Value::Null);
+    assert_eq!(entry["file"], "operations/buy-p.json");
+    assert_eq!(doc["reconcile_truncated"], false);
+    assert_eq!(doc["recent"]["operations"][0]["status"], "confirmed");
+    assert_eq!(record("buy-p")["status"], "confirmed");
+    fake_host::with(|h| assert_eq!(h.inspect_calls, vec!["ob-1".to_string()]));
+    let doc = read_json(ops::read_operation(WALLET, "buy-p"));
+    assert_eq!(doc["status"], "confirmed");
+    assert_eq!(doc["next_action"], "repost");
+}
+
+#[test]
+fn reading_the_staging_route_reconciles_and_persists_the_record() {
+    fake_host::install(host_for_barc_buy());
+    let body = buy_body("buy-k", "25", json!({"allow_worse_venue": true}));
+    fake_host::with(|h| {
+        h.reply_chain(
+            "eth_call",
+            Some(USDC),
+            "dd62ed3e",
+            Ok(serde_json::to_string(&format!("0x{:064x}", GROSS)).unwrap()),
+        );
+        let _ = h.chain("eth_call", &json!([{ "to": addr_hex(USDC), "data": abi::hex0x(&abi::erc20_allowance(wallet_address(), MULTI_ROUTER)) }, "latest"]).to_string());
+    });
+    assert_eq!(route_buy(WALLET, &body), DispatchResponse::Write);
+    assert_eq!(record("buy-k")["step"], "swap");
+    fake_host::with(|h| {
+        h.set_outbox(
+            "ob-1",
+            "success",
+            Some("0xb2"),
+            Some(&json!({"outcome": "success", "tx_hash": "0xb2", "block_number": 20185500})),
+        );
+        h.reply_chain(
+            "eth_call",
+            Some(barc()),
+            &hex(&abi::erc20_balance_of(wallet_address())),
+            Ok(serde_json::to_string(&format!("0x{:064x}", V3_500_OUT)).unwrap()),
+        );
+    });
+    let doc = read_json(buy_description(WALLET));
+    let entry = &doc["reconciled"][0];
+    assert_eq!(entry["id"], "buy-k");
+    assert_eq!(entry["status"], "completed");
+    assert_eq!(entry["step"], "swap");
+    assert_eq!(entry["next_action"], "none");
+    assert_eq!(entry["changed"], true);
+    assert_eq!(entry["error_code"], Value::Null);
+    assert_eq!(doc["reconciled"].as_array().unwrap().len(), 1);
+    assert_eq!(doc["reconcile_truncated"], false);
+    assert_eq!(
+        doc["recent"]["operations"][0]["status"], "completed",
+        "recent reflects the post-reconcile state"
+    );
+    assert!(
+        doc["write_semantics"]
+            .as_str()
+            .unwrap()
+            .contains("reconciles this route's in-flight operations")
+    );
+    let rec = record("buy-k");
+    assert_eq!(rec["status"], "completed");
+    assert_eq!(rec["result"]["method"], "balance_delta");
+    assert_eq!(rec["result"]["amount_out_raw"], V3_500_OUT.to_string());
+    // Terminal now: the next read has nothing to reconcile and asks nothing.
+    let doc = read_json(buy_description(WALLET));
+    assert_eq!(doc["reconciled"].as_array().unwrap().len(), 0);
+    fake_host::with(|h| {
+        assert_eq!(h.inspect_calls, vec!["ob-1".to_string()]);
+        h.assert_chain_calls_allowlisted();
+    });
+}
+
+#[test]
+fn only_operations_of_the_routes_kind_are_reconciled() {
+    fake_host::install(host_for_barc_buy());
+    let sell = seeded_staged(Kind::Sell, "sell-x", "ob-s", NOW);
+    let buy = seeded_staged(Kind::Buy, "buy-x", "ob-b", NOW);
+    fake_host::with(|h| {
+        h.seed_state(&ops::store_key(WALLET, "sell-x"), &sell);
+        h.seed_state(&ops::store_key(WALLET, "buy-x"), &buy);
+        h.set_outbox("ob-s", "cancelled", None, None);
+        h.set_outbox("ob-b", "sent", Some("0x77"), None);
+    });
+    let doc = read_json(buy_description(WALLET));
+    let ids: Vec<&str> = doc["reconciled"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["buy-x"]);
+    assert_eq!(doc["reconciled"][0]["status"], "broadcast");
+    assert_eq!(doc["reconciled"][0]["changed"], true);
+    assert!(
+        doc["recent"]["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|o| o["id"] != "sell-x")
+    );
+    fake_host::with(|h| assert_eq!(h.inspect_calls, vec!["ob-b".to_string()]));
+    assert_eq!(
+        record("sell-x")["status"],
+        "staged",
+        "buy.json leaves sells alone"
+    );
+    assert_eq!(record("buy-x")["status"], "broadcast");
+    // The sell route reconciles its own.
+    let doc = read_json(sell_description(WALLET));
+    assert_eq!(doc["reconciled"][0]["id"], "sell-x");
+    assert_eq!(doc["reconciled"][0]["status"], "failed");
+    assert_eq!(doc["reconciled"][0]["error_code"], "cancelled");
+    assert_eq!(doc["reconciled"][0]["next_action"], "retry");
+    assert_eq!(doc["reconciled"][0]["changed"], true);
+    assert_eq!(record("sell-x")["error"]["code"], "cancelled");
+    fake_host::with(|h| {
+        assert_eq!(
+            h.inspect_calls,
+            vec!["ob-b".to_string(), "ob-s".to_string()]
+        )
+    });
+}
+
+#[test]
+fn reconciliation_is_bounded_to_the_newest_in_flight_operations() {
+    fake_host::install(host_for_barc_buy());
+    fake_host::with(|h| {
+        for i in 0..10u64 {
+            let id = format!("buy-{i:02}");
+            let ob = format!("ob-{i:02}");
+            let op = seeded_staged(Kind::Buy, &id, &ob, NOW + i);
+            h.seed_state(&ops::store_key(WALLET, &id), &op);
+            h.set_outbox(&ob, "pending", None, None);
+        }
+        // A terminal operation is never a candidate, however recent.
+        let mut done = seeded_staged(Kind::Buy, "buy-done", "ob-done", NOW + 100);
+        done.status = Status::Completed;
+        done.result = Some(json!({"method": "balance_delta"}));
+        done.finalize_next_action();
+        h.seed_state(&ops::store_key(WALLET, "buy-done"), &done);
+        h.set_outbox("ob-done", "pending", None, None);
+    });
+    let doc = read_json(buy_description(WALLET));
+    let ids: Vec<&str> = doc["reconciled"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            "buy-09", "buy-08", "buy-07", "buy-06", "buy-05", "buy-04", "buy-03", "buy-02"
+        ],
+        "newest first, eight at most"
+    );
+    assert_eq!(ids.len(), policy::RECONCILE_MAX_OPS);
+    assert_eq!(doc["reconcile_truncated"], true);
+    assert!(
+        doc["reconciled"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["changed"] == false && r["status"] == "staged")
+    );
+    fake_host::with(|h| {
+        assert_eq!(h.inspect_calls.len(), policy::RECONCILE_MAX_OPS);
+        assert!(
+            !h.inspect_calls
+                .iter()
+                .any(|id| id == "ob-00" || id == "ob-01" || id == "ob-done")
+        );
+    });
+    assert_eq!(doc["recent"]["operations"].as_array().unwrap().len(), 5);
+    assert_eq!(doc["recent"]["operations"][0]["id"], "buy-done");
+    assert_eq!(doc["recent"]["scanned"], 11);
+    assert_eq!(doc["recent"]["scan_truncated"], false);
+}
+
+#[test]
+fn an_invalid_network_setting_skips_reconciliation_but_keeps_the_read() {
+    fake_host::install(host_for_barc_buy());
+    let op = seeded_staged(Kind::Buy, "buy-n", "ob-n", NOW);
+    fake_host::with(|h| {
+        h.seed_state(&ops::store_key(WALLET, "buy-n"), &op);
+        h.set_outbox("ob-n", "success", Some("0x1"), None);
+        h.set_setting(crate::api::NETWORK_SETTING, "moon");
+    });
+    let doc = read_json(buy_description(WALLET));
+    assert_eq!(doc["reconciled"][0]["id"], "buy-n");
+    assert_eq!(doc["reconciled"][0]["status"], "staged");
+    assert_eq!(doc["reconciled"][0]["changed"], false);
+    assert!(
+        doc["reconciled"][0]["reconcile_error"]
+            .as_str()
+            .unwrap()
+            .contains("network-setting-invalid"),
+        "{}",
+        doc["reconciled"][0]
+    );
+    assert_eq!(record("buy-n")["status"], "staged");
+    fake_host::with(|h| assert!(h.inspect_calls.is_empty()));
 }
 
 // ---- pad token buy ----
@@ -2194,7 +2500,7 @@ fn launch_with_dev_buy_approves_the_pad_first_and_completes_from_the_index() {
         );
     });
     assert_eq!(record("launch-dev")["step"], "approve");
-    let doc = read_json(ops::read_operation(WALLET, "launch-dev", Network::Stage));
+    let doc = reconciled_record(Kind::Launch, "launch-dev");
     assert_eq!(doc["status"], "confirmed");
     assert_eq!(doc["next_action"], "repost");
     let r = route_launch(WALLET, &launch_body("launch-dev", "5"));
@@ -2222,12 +2528,12 @@ fn launch_with_dev_buy_approves_the_pad_first_and_completes_from_the_index() {
         h.reply_http(&url, 200, &markets());
     });
     // First read: index has not listed it yet -> stays confirmed with a note.
-    let doc = read_json(ops::read_operation(WALLET, "launch-dev", Network::Stage));
+    let doc = reconciled_record(Kind::Launch, "launch-dev");
     assert_eq!(doc["status"], "confirmed");
     assert_eq!(doc["next_action"], "wait");
     assert!(doc["note"].as_str().unwrap().contains("not listed"));
     // Second read: the creator index carries a row at the receipt block.
-    let doc = read_json(ops::read_operation(WALLET, "launch-dev", Network::Stage));
+    let doc = reconciled_record(Kind::Launch, "launch-dev");
     assert_eq!(doc["status"], "completed");
     assert_eq!(doc["result"]["method"], "creator-index-block");
     assert_eq!(
@@ -2271,7 +2577,7 @@ fn launch_completion_survives_an_api_outage() {
         h.reply_http(&url, 200, &markets());
     });
     // API down: the read still returns the durable record, confirmed + note.
-    let doc = read_json(ops::read_operation(WALLET, "launch-out", Network::Stage));
+    let doc = reconciled_record(Kind::Launch, "launch-out");
     assert_eq!(doc["status"], "confirmed");
     assert_eq!(doc["next_action"], "wait");
     assert!(
@@ -2287,7 +2593,7 @@ fn launch_completion_survives_an_api_outage() {
     fake_host::with(|h| {
         h.remove_outbox("ob-1");
     });
-    let doc = read_json(ops::read_operation(WALLET, "launch-out", Network::Stage));
+    let doc = reconciled_record(Kind::Launch, "launch-out");
     assert_eq!(doc["status"], "completed");
     assert_eq!(doc["result"]["method"], "creator-index-block");
 }
@@ -2476,18 +2782,9 @@ fn records_and_errors_never_carry_host_internals() {
 #[test]
 fn operation_read_validates_and_reports_not_found() {
     fake_host::install(host_for_barc_buy());
-    assert_eq!(
-        code(&ops::read_operation(WALLET, "missing", Network::Stage)),
-        -1
-    );
-    assert_eq!(
-        code(&ops::read_operation(WALLET, "Bad Id", Network::Stage)),
-        -3
-    );
-    assert_eq!(
-        code(&ops::read_operation("team/alice", "x", Network::Stage)),
-        -3
-    );
+    assert_eq!(code(&ops::read_operation(WALLET, "missing")), -1);
+    assert_eq!(code(&ops::read_operation(WALLET, "Bad Id")), -3);
+    assert_eq!(code(&ops::read_operation("team/alice", "x")), -3);
     assert_eq!(ops::list_ids(WALLET).unwrap(), Vec::<String>::new());
     // Kind names used in records are stable.
     assert_eq!(serde_json::to_value(Kind::Launch).unwrap(), "launch");

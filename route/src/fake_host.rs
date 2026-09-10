@@ -54,6 +54,8 @@ pub struct FakeHost {
     chain_rules: Vec<ChainRule>,
     state: BTreeMap<String, Vec<u8>>,
     pub staged: Vec<EvmTransaction>,
+    /// Every `tx_inspect` the routes made, by outbox id.
+    pub inspect_calls: Vec<String>,
     stage_failures: VecDeque<SdkError>,
     outbox: BTreeMap<String, OutboxInspection>,
     vfs: BTreeMap<String, Vec<u8>>,
@@ -240,6 +242,11 @@ impl FakeHost {
     pub fn set_setting(&mut self, key: &str, value: &str) -> &mut Self {
         self.settings.insert(key.to_owned(), value.to_owned());
         self
+    }
+
+    /// Successful store writes so far (`put`, `put_new`, `del`).
+    pub fn store_writes(&self) -> usize {
+        self.puts
     }
 
     pub fn eth_calls_to(&self, to: Address) -> Vec<&ChainCall> {
@@ -439,6 +446,7 @@ pub fn tx_inspect(
     petal::validate_wallet_id(wallet).map_err(SdkError::Message)?;
     assert_eq!(chain, crate::constants::CHAIN);
     with(|host| {
+        host.inspect_calls.push(outbox_id.to_owned());
         host.outbox
             .get(outbox_id)
             .cloned()

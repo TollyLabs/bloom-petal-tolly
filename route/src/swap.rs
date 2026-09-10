@@ -225,13 +225,18 @@ pub fn buy_description(wallet: &str) -> DispatchResponse {
     if let Err(r) = check_wallet_id(wallet) {
         return r;
     }
+    // This route staged the entries, so this is where the host lets them be
+    // inspected: reconcile first, then project (see `ops::route_read_side`).
+    let side = ops::route_read_side(wallet, Kind::Buy, 5);
     petal::read_json_value(&json!({
         "schema": "tolly.buy-request.v1",
-        "description": "Stage a USDC -> token buy for this Bloom wallet. One write stages at most one transaction (an exact USDC approve when the allowance is short, else the swap); read operations/<operationId>.json and follow next_action.",
+        "description": "Stage a USDC -> token buy for this Bloom wallet. One write stages at most one transaction (an exact USDC approve when the allowance is short, else the swap); after a write read this file (last_write, reconciled), then operations/<operationId>.json and follow next_action.",
         "writes_enabled": policy::writes_enabled(),
         "writes_setting": format!("{}={}", policy::WRITES_SETTING, policy::WRITES_ENABLED_VALUE),
         "write_semantics": trace::WRITE_SEMANTICS,
         "last_write": trace::last_write_json(wallet),
+        "reconciled": side.reconciled,
+        "reconcile_truncated": side.truncated,
         "body": {
             "operationId": "required; [a-z0-9][a-z0-9._-]{0,63}; idempotency key bound to (token, amount_usdc)",
             "token": "required; 0x token address",
@@ -244,7 +249,7 @@ pub fn buy_description(wallet: &str) -> DispatchResponse {
         },
         "limits": { "max_op_usdc": policy::MAX_OP_USDC_HUMAN, "interface_fee_bps_external_buys": INTERFACE_FEE_BPS },
         "quote_first": "quote/<token>/buy/<usdc>.json",
-        "recent": ops::recent_summary(wallet, Kind::Buy, 5),
+        "recent": side.recent,
     }))
 }
 
@@ -253,13 +258,16 @@ pub fn sell_description(wallet: &str) -> DispatchResponse {
     if let Err(r) = check_wallet_id(wallet) {
         return r;
     }
+    let side = ops::route_read_side(wallet, Kind::Sell, 5);
     petal::read_json_value(&json!({
         "schema": "tolly.sell-request.v1",
-        "description": "Stage a token -> USDC sell for this Bloom wallet. One write stages at most one transaction (an exact token approve when the allowance is short, else the swap); no interface fee applies to sells.",
+        "description": "Stage a token -> USDC sell for this Bloom wallet. One write stages at most one transaction (an exact token approve when the allowance is short, else the swap); no interface fee applies to sells. After a write read this file (last_write, reconciled), then operations/<operationId>.json.",
         "writes_enabled": policy::writes_enabled(),
         "writes_setting": format!("{}={}", policy::WRITES_SETTING, policy::WRITES_ENABLED_VALUE),
         "write_semantics": trace::WRITE_SEMANTICS,
         "last_write": trace::last_write_json(wallet),
+        "reconciled": side.reconciled,
+        "reconcile_truncated": side.truncated,
         "body": {
             "operationId": "required; [a-z0-9][a-z0-9._-]{0,63}; idempotency key bound to (token, amount)",
             "token": "required; 0x token address",
@@ -272,7 +280,7 @@ pub fn sell_description(wallet: &str) -> DispatchResponse {
         },
         "limits": { "max_quoted_usdc_out": policy::MAX_OP_USDC_HUMAN },
         "quote_first": "quote/<token>/sell/<amount>.json",
-        "recent": ops::recent_summary(wallet, Kind::Sell, 5),
+        "recent": side.recent,
     }))
 }
 

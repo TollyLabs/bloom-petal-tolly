@@ -39,7 +39,7 @@ const MAX_MESSAGE_CHARS: usize = 512;
 const MAX_ID_ECHO_CHARS: usize = 96;
 
 /// What an agent reads to learn how a write ended when no record says so.
-pub const WRITE_SEMANTICS: &str = "On the mounted filesystem write() always succeeds: Bloom delivers Petal writes asynchronously and the route's answer is not returned to the writer. Right after every write read last_write here first: check body_sha256 against the bytes you wrote, then record_effect/note say whether and where the outcome landed; if record is set, read that operations/<operationId>.json. Via `bloom vfs write` the same errors are returned synchronously.";
+pub const WRITE_SEMANTICS: &str = "On the mounted filesystem write() always succeeds: Bloom delivers Petal writes asynchronously and the route's answer is not returned to the writer. Right after every write read this file first: last_write — check body_sha256 against the bytes you wrote, then record_effect/note say whether and where the outcome landed. Reading this file also reconciles this route's in-flight operations against Bloom's outbox (see reconciled; the host binds outbox inspection to the route that staged the entry, so no other file can do it), and operations/<operationId>.json is a cached projection of the stored record (~5 s) that lags until you read this file; if record is set, read it after this file. Via `bloom vfs write` the same errors are returned synchronously.";
 
 pub fn marker_key(wallet: &str) -> String {
     format!("{LASTWRITE_PREFIX}{wallet}")

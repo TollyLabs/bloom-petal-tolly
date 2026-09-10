@@ -55,6 +55,35 @@ if search_files 'secret_key|load_secret_bytes|load_secret_json|"secrets"' route/
   failed=1
 fi
 
+# Host fact (Bloom v0.2.1, bloom-mount/src/adapter.rs `should_render_for_attrs`):
+# a side-effecting read reports st_size 0 on the NFS mount and `cat` reads 0
+# bytes; only `bloom vfs cat` returns the body. The SDK's `chain_read_spec()`
+# sets side_effecting_read(true), so no route may use it.
+if search_lines 'chain_read_spec' route/files; then
+  echo "route architecture check: chain_read_spec renders as an empty file on the mount; use a non-side-effecting spec (account_read_spec / http_read_spec / store specs)" >&2
+  failed=1
+fi
+
+# Host fact (bloom-daemon/src/lib.rs `tx_inspect`): outbox inspection is bound
+# to the execution origin that staged the entry (petal id, package hash AND
+# route id). The operation record route therefore cannot inspect: it is a pure
+# store projection under the 5 s account cache, and reconciliation lives in
+# the read handlers of the routes that stage (buy/sell/launch).
+record_route='route/files/wallets/[wallet]/operations/[id].json.rs'
+if [[ ! -f "$record_route" ]]; then
+  echo "route architecture check: missing $record_route" >&2
+  failed=1
+else
+  if ! search_quiet 'petal::account_read_spec\(\)\.caps\(&\["bloom:store"\]\)' "$record_route"; then
+    echo "route architecture check: $record_route must use petal::account_read_spec().caps(&[\"bloom:store\"]) (store only; no outbox, chain or http)" >&2
+    failed=1
+  fi
+  if search_lines 'bloom:tx\.outbox|bloom:chain|bloom:http|bloom:vfs|tx_inspect\(|::reconcile|route_read_side' "$record_route"; then
+    echo "route architecture check: the operation record route must not inspect, read the chain, fetch or reconcile" >&2
+    failed=1
+  fi
+fi
+
 # A writable route should also define a local read handler so the file is
 # discoverable and safe to read for instructions.
 while IFS= read -r route_file; do
