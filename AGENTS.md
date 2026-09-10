@@ -263,9 +263,11 @@ cannot regress the record to `unknown`.
 - `staged`, `broadcast`: a re-POST is a no-op refresh. Never expect a second
   entry; if the pending entry is stale (the quote is old — SwapRouter02 and the
   TOLLY routers have no deadline, only `amountOutMinimum` protects you) ask the
-  owner to cancel it in Bloom (`…/outbox/pending/<id>/cancel`), read the
-  route file (its `reconciled[]` turns the record `failed`/`cancelled`) and
-  re-POST after the record reports it.
+  owner to cancel it in Bloom (write the word `cancel` into
+  `…/outbox/pending/<id>/confirm`; on Bloom v0.2.1 the separate `cancel`
+  file is refused both on the mount and through `bloom vfs write`), read the
+  route file (its `reconciled[]` turns the record `failed`/`cancelled`,
+  `retryable: true`) and re-POST after the record reports it.
 - `failed` with `retryable: true` — exactly these codes: `reverted`,
   `expired-or-dropped`, `cancelled`, `stage-failed`, `quote-unavailable`,
   `fee-check-unavailable`, `venue-changed`, `venue-unsupported`,
@@ -339,7 +341,20 @@ cached, so every read of them reconciles.
 
 `operations/` (the directory listing) is served with the host's 30 s cache:
 a new operation may take up to 30 s to appear in `ls`, though its file is
-readable immediately. `positions.json` is cached for 5 s. Listings load at
+readable immediately. Always open a record by its exact path: `ls -l`
+reports size 0 for a record nobody has opened yet (the mount only learns a
+parameterized file's real size on that file's first lookup), and a `cat`
+right after such a listing can return 0 bytes — `stat`/`cat` the exact path
+again and it renders. `bloom vfs cat` always returns the body.
+
+Records live in the Petal's private store, which Bloom namespaces by
+PACKAGE hash: installing a new build of this Petal starts with an empty
+store. Records, the live-entry index and the last-write marker of the
+previous build are gone, while its outbox entries stay pending in Bloom and
+the new build cannot inspect them (inspection is bound to the package and
+route that staged them). Before upgrading, let in-flight operations settle
+or have the owner cancel their entries; after upgrading, treat a pending
+entry you cannot see in any record as foreign and cancel it the same way. `positions.json` is cached for 5 s. Listings load at
 most 1000 records per wallet (`scan_truncated: true` in `recent` /
 `bounds.scan` when more exist).
 

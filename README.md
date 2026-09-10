@@ -211,6 +211,30 @@ No test contacts a network or a Bloom daemon.
   hash, an entry from another route); `ops::classify_error` keeps it a
   non-regressing `unknown` with the note "outbox inspection: <reason> (entry
   not staged by this route?)".
+- The Petal's private store is namespaced by PACKAGE hash
+  (`bloom-petals/src/vm.rs` passes the package hash as the store's
+  `petal_hash`; `private_store.rs` `store_is_namespaced_by_hash`): every
+  new build starts with an empty store. Observed 2026-09-11 when v0.1.2
+  replaced v0.1.0: `operations/` was empty and the v0.1.0 record
+  `buy-tolly-1` was gone while its outbox entry `0001-08786` stayed
+  pending (and is not inspectable by the new package). Documented in
+  AGENTS.md "Freshness"; a store migration across package hashes is not
+  available to a Petal.
+- Directory listings report size 0 for parameterized files until their
+  first lookup: the runtime metadata that narrows `side_effecting_read`
+  is evaluated on LOOKUP of the concrete path, and READDIR entries come
+  from the route index (size 0). Measured 2026-09-11 on v0.1.2: after
+  `ls -l operations/` a never-opened record `stat`ed 0 bytes; opening it by
+  exact path rendered 1713 bytes and the listing then showed 1713. The
+  mount uses `actimeo=0`, so nothing stale is cached on the client side.
+- Cancelling a pending outbox entry: the mount refuses writes to
+  `…/outbox/pending/<id>/cancel` and `…/replace` (`bloom-mount/src/adapter.rs`
+  `mount_write_path_uses_wallet_signer` → EPERM) and `bloom vfs write` to
+  the same path answers "permission denied"; writing the word `cancel` into
+  `…/pending/<id>/confirm` cancels (`handlers_wallets.rs`, "confirm —
+  broadcast" arm) and moves the entry to `outbox/failed/`. Verified
+  2026-09-11: entry `0002-71268` cancelled that way; the next `buy.json`
+  read reconciled the record to `failed` / `cancelled` / `retryable: true`.
 - `bloom:chain` allowlist is exactly `eth_chainId`, `eth_getBalance`,
   `eth_getCode`, `eth_call` at the latest block. No receipts, no gas
   estimation, no block number are requested; funding uses a fixed native
@@ -282,13 +306,19 @@ No test contacts a network or a Bloom daemon.
 
 - V4 execution (TollyV4Router / UniversalRouter / Permit2 paths).
 - Prod manifest release; `markets/all.json` (scope=all with the spam filter).
-- Runtime smoke on a daemon from this environment: none here. On a Bloom
-  v0.2.1 host the petal installs and its read routes work on the mounted
-  VFS (status/markets/tokens/quote verified 2026-09-10; the 2026-09-11 stat
-  measurements above were taken on petal v0.1.0); the write path's
-  asynchronous delivery is what D13 answers, and the two host facts above
-  are what D14 answers. A mounted smoke of the post-write flow after this
-  release (write → read `buy.json` → `reconciled[]` → read the record, and
-  `stat` of the record showing a non-zero size) is still to do.
+- Mounted smoke of v0.1.2 on Bloom v0.2.1 (Ubuntu 24.04, wallet `main`,
+  Arc, 2026-09-11): a refused write (`amount_usdc: 300`) left
+  `last_write` (`outcome: refused`, `cap-exceeded`, `record_effect:
+  created`) and a `failed`/`retry` record readable on the mount (1713
+  bytes by exact path); an accepted 1 USDC TOLLY buy left `last_write`
+  `accepted`, `reconciled[]` reported `staged` / `approve` /
+  `confirm_in_bloom` and the record (3401 bytes on the mount) carried the
+  outbox id, `confirm_path` and the plan (whose policy section showed the
+  wallet's `[Deny] allowlists.recipients` — an empty `allowed_destinations`
+  denies every recipient until the owner's policy update); cancelling that
+  entry through its `confirm` file reconciled the record to `failed` /
+  `cancelled` / `retryable: true` on the next `buy.json` read. Not yet
+  exercised live: a confirmed approve + swap (needs the wallet policy's
+  destinations allowlist), launches, sells.
 - Release workflow (`release-petal.yml`, `expected-route-count: 21`) and the
   GitHub extraction (`git subtree split -P petals/tolly`).
