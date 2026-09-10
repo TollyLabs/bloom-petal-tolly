@@ -17,7 +17,7 @@ use crate::constants::{PAD, USDC, USDC_ERC20_DECIMALS};
 use crate::host;
 use crate::ops::{self, Kind, Operation, Status, Step};
 use crate::policy::{self, MAX_BODY_BYTES, META_MAX_BYTES};
-use crate::swap::stage_step;
+use crate::swap::{acknowledge_unrecorded_stage, stage_step};
 use crate::tx;
 use crate::wallet::{check_wallet_id, wallet_address};
 
@@ -44,6 +44,10 @@ pub struct LaunchRequest {
     pub meta: MetaRequest,
     #[serde(default)]
     pub dev_buy_usdc: Option<String>,
+    /// Required `true` to stage again after a stage whose record could not be
+    /// written (`stage_in_flight`); see AGENTS.md "Unrecorded stage".
+    #[serde(default)]
+    pub acknowledge_unrecorded_stage: Option<bool>,
 }
 
 struct Intent {
@@ -52,6 +56,7 @@ struct Intent {
     symbol: String,
     meta: TokenMeta,
     dev_buy_raw: U256,
+    acknowledge_unrecorded_stage: bool,
 }
 
 fn validate(request: &LaunchRequest) -> Result<Intent, String> {
@@ -103,6 +108,7 @@ fn validate(request: &LaunchRequest) -> Result<Intent, String> {
         symbol,
         meta,
         dev_buy_raw,
+        acknowledge_unrecorded_stage: request.acknowledge_unrecorded_stage.unwrap_or(false),
     })
 }
 
@@ -123,6 +129,7 @@ pub fn launch_description(wallet: &str) -> DispatchResponse {
             "symbol": "required; trimmed and upper-cased",
             "meta": { "imageURI": "required; already-pinned URI, <= 512 bytes", "website": "optional <= 512 bytes", "twitter": "optional <= 512 bytes", "telegram": "optional <= 512 bytes" },
             "dev_buy_usdc": format!("optional decimal USDC, default 0, max {}", policy::MAX_DEV_BUY_USDC_HUMAN),
+            "acknowledge_unrecorded_stage": "optional; required true to stage again after the record reports stage_in_flight (an outbox entry this Petal staged but could not record)",
         },
         "notes": [
             "the token address is never predicted; it is read from the TOLLY index after the launch mines (result.token)",
@@ -239,7 +246,6 @@ fn advance(wallet: &str, intent: Intent, echo: Value) -> DispatchResponse {
             "operationId already bound to a different operation kind",
         );
     }
-    op.request = echo;
     match ops::reconcile(&mut op, network, now) {
         Ok(changed) => {
             if changed && let Err(e) = ops::save(&op) {
@@ -255,19 +261,18 @@ fn advance(wallet: &str, intent: Intent, echo: Value) -> DispatchResponse {
         Status::Confirmed if op.step != Some(Step::Approve) => return DispatchResponse::Write,
         _ => {}
     }
+    if let Err(r) = acknowledge_unrecorded_stage(&mut op, intent.acknowledge_unrecorded_stage, now)
+    {
+        return r;
+    }
     match ops::live_conflict(wallet, Kind::Launch, &intent.symbol, &intent.id) {
-        Ok(Some(other)) => {
-            return petal::error(
-                -2,
-                format!(
-                    "another launch operation ({other}) for {} still has a pending outbox entry; confirm or cancel it in Bloom first",
-                    intent.symbol
-                ),
-            );
+        Ok(Some(conflict)) => {
+            return petal::error(-2, conflict.message(&format!("launch {}", intent.symbol)));
         }
         Ok(None) => {}
         Err(e) => return petal::error(-4, e),
     }
+    op.request = echo;
 
     // Salt: drawn once, frozen.
     let salt: [u8; 32] = match op.plan.salt.as_deref() {
@@ -432,6 +437,7 @@ mod tests {
                 telegram: "".into(),
             },
             dev_buy_usdc: dev_buy.map(str::to_owned),
+            acknowledge_unrecorded_stage: None,
         }
     }
 

@@ -38,9 +38,6 @@ pub mod fake_host;
 #[cfg(test)]
 mod route_tests;
 
-pub use serde_json;
-pub use serde_json::json;
-
 /// Route-file helper: the standard error shape (`-1` not found, `-2` denied,
 /// `-3` invalid, `-4` backend).
 pub fn err(code: i32, message: impl Into<String>) -> petal::DispatchResponse {

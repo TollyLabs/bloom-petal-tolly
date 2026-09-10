@@ -27,14 +27,18 @@ use crate::api::{ApiRoute, Network, fetch_json, launch_rows};
 use crate::chain;
 use crate::constants::{CHAIN, USDC, USDC_ERC20_DECIMALS};
 use crate::host;
-use crate::policy::LIVE_SCAN_MAX_OPS;
+use crate::policy::OPS_SCAN_MAX_OPS;
 use crate::sanitize_host_error;
 use crate::wallet::check_wallet_id;
 
 pub const SCHEMA: &str = "tolly.operation.v1";
 pub const STORE_PREFIX: &str = "tolly/ops/";
+/// One key per `(wallet, kind, subject)` naming the operation that last
+/// staged for it (critique M1): the live-entry check is one read, not a scan.
+pub const LIVE_PREFIX: &str = "tolly/live/";
 const MAX_RECORD_BYTES: usize = 64 * 1024;
 const MAX_LIST_BYTES: usize = 256 * 1024;
+const MAX_LIVE_BYTES: usize = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -123,6 +127,19 @@ pub struct TxEntry {
     pub plan_md: String,
 }
 
+/// Written to the record BEFORE `tx_stage` and cleared by the save that
+/// records the resulting `txs[]` entry. If that save fails, the marker
+/// survives: an outbox entry may be live that no `txs[]` entry names, so a
+/// re-POST refuses to stage again until the agent acknowledges it (critique
+/// M1: never two live entries for one operation).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageMarker {
+    pub step: Step,
+    pub to: String,
+    pub data_sha256: String,
+    pub staged_ms: u64,
+}
+
 /// Frozen at the first stage; execution parameters may be refreshed on a
 /// later attempt.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +188,13 @@ pub struct Operation {
     pub result: Option<Value>,
     pub error: Option<OpError>,
     pub note: Option<String>,
+    /// A stage whose `txs[]` entry could not be persisted (see `StageMarker`).
+    #[serde(default)]
+    pub stage_in_flight: Option<StageMarker>,
+    /// Markers the agent acknowledged with `acknowledge_unrecorded_stage`
+    /// (audit trail; these entries live only in Bloom's outbox).
+    #[serde(default)]
+    pub unrecorded_stages: Vec<StageMarker>,
 }
 
 impl Operation {
@@ -206,6 +230,8 @@ impl Operation {
             result: None,
             error: None,
             note: None,
+            stage_in_flight: None,
+            unrecorded_stages: Vec::new(),
         }
     }
 
@@ -279,6 +305,7 @@ impl Operation {
 
     pub fn finalize_next_action(&mut self) {
         self.next_action = match self.status {
+            Status::Created if self.stage_in_flight.is_some() => NextAction::Inspect,
             Status::Created => NextAction::Repost,
             Status::Staged => NextAction::ConfirmInBloom,
             Status::Broadcast => NextAction::Wait,
@@ -326,6 +353,11 @@ pub fn store_key(wallet: &str, id: &str) -> String {
     format!("{STORE_PREFIX}{wallet}/{id}")
 }
 
+/// sha256 of arbitrary bytes, hex (stage markers).
+pub fn sha256_hex(data: &[u8]) -> String {
+    hex::encode(Sha256::digest(data))
+}
+
 /// sha256(kind || JCS(economic tuple)), hex.
 pub fn request_digest(kind: Kind, economic: &Value) -> String {
     let canonical =
@@ -357,15 +389,58 @@ pub fn save(op: &Operation) -> Result<(), String> {
 }
 
 /// Atomically claim the id. `Ok(false)` means it already exists.
+///
+/// The daemon reports an existing key as a message containing "already
+/// exists" (`vm.rs` `component_store_put_new`), which the SDK's `host_err`
+/// surfaces as `SdkError::Message` or, depending on the prefix, as
+/// `Denied`/`Invalid`; every one of those means "exists", none is a failure.
 pub fn claim(op: &Operation) -> Result<bool, String> {
     let bytes = serde_json::to_vec(op).map_err(|e| format!("operation record serialize: {e}"))?;
     match host::store_put_new(&store_key(&op.wallet, &op.id), &bytes) {
         Ok(()) => Ok(true),
-        Err(SdkError::Host(HostStatus::Denied)) => Ok(false),
+        Err(SdkError::Host(HostStatus::Denied | HostStatus::Invalid)) => Ok(false),
+        Err(SdkError::Message(m)) if m.to_ascii_lowercase().contains("already exists") => Ok(false),
         Err(e) => Err(format!(
             "operation record: {}",
             sanitize_host_error(&e.message())
         )),
+    }
+}
+
+// ---- live-entry index (critique M1) ----
+
+fn live_key(wallet: &str, kind: Kind, subject: &str) -> String {
+    format!(
+        "{LIVE_PREFIX}{wallet}/{}/{}",
+        kind.name(),
+        subject.to_ascii_lowercase()
+    )
+}
+
+/// Point the `(wallet, kind, subject)` index at `id` before staging for it.
+pub fn live_index_set(wallet: &str, kind: Kind, subject: &str, id: &str) -> Result<(), String> {
+    let value = serde_json::to_vec(&json!({ "id": id }))
+        .map_err(|e| format!("live index serialize: {e}"))?;
+    host::store_put(&live_key(wallet, kind, subject), &value)
+        .map_err(|e| format!("live index: {}", sanitize_host_error(&e.message())))
+}
+
+fn live_index_get(wallet: &str, kind: Kind, subject: &str) -> Result<Option<String>, String> {
+    match host::store_get(&live_key(wallet, kind, subject), MAX_LIVE_BYTES) {
+        Ok(bytes) => {
+            let value: Value =
+                serde_json::from_slice(&bytes).map_err(|e| format!("live index parse: {e}"))?;
+            Ok(value["id"].as_str().map(str::to_owned))
+        }
+        Err(SdkError::Host(HostStatus::NotFound)) => Ok(None),
+        Err(e) => Err(format!("live index: {}", sanitize_host_error(&e.message()))),
+    }
+}
+
+fn live_index_clear(wallet: &str, kind: Kind, subject: &str) -> Result<(), String> {
+    match host::store_del(&live_key(wallet, kind, subject)) {
+        Ok(()) | Err(SdkError::Host(HostStatus::NotFound)) => Ok(()),
+        Err(e) => Err(format!("live index: {}", sanitize_host_error(&e.message()))),
     }
 }
 
@@ -398,16 +473,32 @@ pub fn list_wallets() -> Result<Vec<String>, String> {
     Ok(wallets)
 }
 
-/// The most recent operations of a wallet (by `updated_ms`), bounded.
-pub fn recent(wallet: &str, max: usize) -> Result<Vec<Operation>, String> {
-    let mut ops: Vec<Operation> = list_ids(wallet)?
+/// The most recent operations of a wallet (by `updated_ms`), optionally of
+/// one kind. Every record is loaded before sorting, up to
+/// `OPS_SCAN_MAX_OPS` ids; `Recent::truncated` says whether that bound hit.
+pub struct Recent {
+    pub ops: Vec<Operation>,
+    pub scanned: usize,
+    pub truncated: bool,
+}
+
+pub fn recent(wallet: &str, kind: Option<Kind>, max: usize) -> Result<Recent, String> {
+    let ids = list_ids(wallet)?;
+    let truncated = ids.len() > OPS_SCAN_MAX_OPS;
+    let scanned = ids.len().min(OPS_SCAN_MAX_OPS);
+    let mut ops: Vec<Operation> = ids
         .iter()
-        .take(LIVE_SCAN_MAX_OPS.max(max))
+        .take(OPS_SCAN_MAX_OPS)
         .filter_map(|id| load(wallet, id).ok().flatten())
+        .filter(|op| kind.is_none_or(|k| op.kind == k))
         .collect();
     ops.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms));
     ops.truncate(max);
-    Ok(ops)
+    Ok(Recent {
+        ops,
+        scanned,
+        truncated,
+    })
 }
 
 // ---- host truth -> record ----
@@ -493,6 +584,16 @@ pub fn apply(op: &mut Operation, index: usize, inspected: &Inspected, now_ms: u6
     }
     let before = op.clone();
     let tx = &mut op.txs[index];
+    // A recorded receipt outcome is final: losing sight of the entry later
+    // (pruned, denied) must not regress what the host already told us.
+    if inspected.state == TxState::Unknown && tx.outcome.is_some() {
+        op.note = inspected.revert_reason.clone();
+        let changed = *op != before;
+        if changed {
+            op.updated_ms = now_ms;
+        }
+        return changed;
+    }
     if inspected.state != TxState::Unknown {
         tx.outbox_state = inspected.raw_state.clone();
         if inspected.tx_hash.is_some() {
@@ -617,11 +718,17 @@ pub fn try_complete(op: &mut Operation, network: Network, now_ms: u64) -> Result
                 .map(parse_u256_decimal)
                 .transpose()?
                 .unwrap_or(U256::ZERO);
+            // On Arc the ERC-20 USDC view IS the gas balance: a sell's delta is
+            // net of the gas the sell itself paid (and the receipt carries no
+            // gas_used to correct it), so it is labelled as such and never
+            // triggers the "did not increase" suspicion.
+            let net_of_gas = op.kind == Kind::Sell;
             match chain::erc20_balance_of(token_out, wallet_address) {
                 Ok(after) => {
                     let delta = after.saturating_sub(balance_before);
-                    op.result = Some(json!({
-                        "method": "balance_delta",
+                    let evidence = json!({
+                        "method": if net_of_gas { "balance_delta_net_of_gas" } else { "balance_delta" },
+                        "net_of_gas": net_of_gas,
                         "token_out": addr_hex(token_out),
                         "amount_out_raw": delta.to_string(),
                         "amount_out_human": format_units(delta, decimals),
@@ -629,13 +736,20 @@ pub fn try_complete(op: &mut Operation, network: Network, now_ms: u64) -> Result
                         "balance_after_raw": after.to_string(),
                         "tx_hash": tx.tx_hash,
                         "block_number": tx.block_number,
-                    }));
-                    op.status = Status::Completed;
-                    op.note = if delta == U256::ZERO {
-                        Some("the swap mined but the output balance did not increase; verify the wallet did not move the token meanwhile".into())
+                    });
+                    if delta == U256::ZERO && !net_of_gas {
+                        // Durable state never overstates completion: a mined
+                        // buy without a visible output stays `confirmed`.
+                        op.note = Some("the swap mined but the output token balance did not increase; verify the wallet did not move the token meanwhile, then read again".into());
                     } else {
-                        None
-                    };
+                        op.result = Some(evidence);
+                        op.status = Status::Completed;
+                        op.note = if delta == U256::ZERO {
+                            Some("the sell mined; the USDC delta net of the gas paid from the same balance is zero".into())
+                        } else {
+                            None
+                        };
+                    }
                 }
                 Err(e) => {
                     op.note = Some(format!("completion evidence unavailable: {e}"));
@@ -643,8 +757,23 @@ pub fn try_complete(op: &mut Operation, network: Network, now_ms: u64) -> Result
             }
         }
         Kind::Launch => {
-            let list = fetch_json(network, &ApiRoute::LaunchesByCreator(wallet_address))
-                .map_err(|e| e.message())?;
+            // Missing evidence never fails the read: while the TOLLY API is
+            // down the record keeps its durable `confirmed` state and a note.
+            let list = match fetch_json(network, &ApiRoute::LaunchesByCreator(wallet_address)) {
+                Ok(list) => list,
+                Err(e) => {
+                    op.note = Some(format!(
+                        "completion evidence unavailable: TOLLY API: {}",
+                        e.message()
+                    ));
+                    op.finalize_next_action();
+                    let changed = *op != before;
+                    if changed {
+                        op.updated_ms = now_ms;
+                    }
+                    return Ok(changed);
+                }
+            };
             let rows = launch_rows(&list);
             let by_block = tx
                 .block_number
@@ -695,6 +824,8 @@ pub fn reconcile(op: &mut Operation, network: Network, now_ms: u64) -> Result<bo
         op.status,
         Status::Staged | Status::Broadcast | Status::Confirmed | Status::Unknown
     ) && let Some(index) = op.latest_live()
+        // A success receipt is final; do not ask the host again.
+        && op.txs[index].outcome.as_deref() != Some("success")
     {
         let outbox_id = op.txs[index].outbox_id.clone();
         let inspected = match host::tx_inspect(&op.wallet, CHAIN, &outbox_id) {
@@ -734,47 +865,71 @@ pub fn read_operation(wallet: &str, id: &str, network: Network) -> DispatchRespo
     petal::read_json_value(&op)
 }
 
+/// Why another operation blocks a new stage for the same subject.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LiveConflict {
+    /// That operation's latest entry is still `pending` in the outbox.
+    Pending { id: String },
+    /// That operation staged an entry it could not record (`stage_in_flight`).
+    Unrecorded { id: String },
+}
+
+impl LiveConflict {
+    pub fn message(&self, what: &str) -> String {
+        match self {
+            Self::Pending { id } => format!(
+                "another operation ({id}) for {what} still has a pending outbox entry; confirm or cancel it in Bloom first"
+            ),
+            Self::Unrecorded { id } => format!(
+                "another operation ({id}) for {what} staged an outbox entry it could not record; inspect that operation and acknowledge it before staging again"
+            ),
+        }
+    }
+}
+
 /// Critique M1: refuse a new stage while another operation of this wallet
-/// for the same subject still has a pending outbox entry. Returns that
-/// operation's id.
+/// for the same subject still has a live outbox entry. The `(wallet, kind,
+/// subject)` index names the last operation that staged for it; the host's
+/// `tx_inspect` decides whether its entry is still pending, whatever status
+/// the record was last persisted with (`staged`, `unknown`, ...). A stale
+/// index entry is cleared on the way.
 pub fn live_conflict(
     wallet: &str,
     kind: Kind,
     subject: &str,
     exclude_id: &str,
-) -> Result<Option<String>, String> {
-    for id in list_ids(wallet)?.iter().take(LIVE_SCAN_MAX_OPS) {
-        if id == exclude_id {
-            continue;
-        }
-        let Some(op) = load(wallet, id)? else {
-            continue;
-        };
-        if op.kind != kind
-            || op.status != Status::Staged
-            || !op.subject().eq_ignore_ascii_case(subject)
-        {
-            continue;
-        }
-        let Some(index) = op.latest_live() else {
-            continue;
-        };
-        if let Ok(inspection) = host::tx_inspect(wallet, CHAIN, &op.txs[index].outbox_id)
-            && classify(&inspection).state == TxState::Pending
-        {
-            return Ok(Some(op.id.clone()));
-        }
+) -> Result<Option<LiveConflict>, String> {
+    let Some(id) = live_index_get(wallet, kind, subject)? else {
+        return Ok(None);
+    };
+    if id == exclude_id {
+        return Ok(None);
     }
+    let Some(op) = load(wallet, &id)? else {
+        live_index_clear(wallet, kind, subject)?;
+        return Ok(None);
+    };
+    if op.stage_in_flight.is_some() {
+        return Ok(Some(LiveConflict::Unrecorded { id }));
+    }
+    if let Some(index) = op.latest_live()
+        && op.txs[index].outcome.is_none()
+        && let Ok(inspection) = host::tx_inspect(wallet, CHAIN, &op.txs[index].outbox_id)
+        && classify(&inspection).state == TxState::Pending
+    {
+        return Ok(Some(LiveConflict::Pending { id }));
+    }
+    live_index_clear(wallet, kind, subject)?;
     Ok(None)
 }
 
 /// Compact projection of recent operations for the writable routes' read side.
 pub fn recent_summary(wallet: &str, kind: Kind, max: usize) -> Value {
-    match recent(wallet, LIVE_SCAN_MAX_OPS) {
-        Ok(ops) => Value::Array(
-            ops.into_iter()
-                .filter(|op| op.kind == kind)
-                .take(max)
+    match recent(wallet, Some(kind), max) {
+        Ok(recent) => json!({
+            "operations": recent
+                .ops
+                .into_iter()
                 .map(|op| {
                     json!({
                         "id": op.id,
@@ -785,8 +940,10 @@ pub fn recent_summary(wallet: &str, kind: Kind, max: usize) -> Value {
                         "file": format!("operations/{}.json", op.id),
                     })
                 })
-                .collect(),
-        ),
+                .collect::<Vec<_>>(),
+            "scanned": recent.scanned,
+            "scan_truncated": recent.truncated,
+        }),
         Err(e) => json!({ "error": e }),
     }
 }

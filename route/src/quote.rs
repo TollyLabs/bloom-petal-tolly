@@ -196,6 +196,7 @@ fn quote_venue(
     venue: &Venue,
     provenance: Provenance,
     token: Address,
+    quote_decimals: u32,
     side: Side,
     net: U256,
 ) -> VenueQuote {
@@ -232,6 +233,14 @@ fn quote_venue(
             if !venue.tradeable {
                 return no_fill(venue, execution, net, "v4-no-live-liquidity");
             }
+            // `venueMatchesQuoteDecimals`: the site only considers a V4 venue
+            // whose quote representation is the one the API's canonical market
+            // uses for this token. Mirror it so `best` never names a venue the
+            // website would not.
+            let venue_quote_decimals = if venue.native_quote { 18 } else { 6 };
+            if venue_quote_decimals != quote_decimals {
+                return no_fill(venue, execution, net, "quote-decimals-mismatch");
+            }
             let Some(key) = v4_pool_key(venue) else {
                 return no_fill(venue, execution, net, "v4-incomplete-pool-key");
             };
@@ -240,6 +249,16 @@ fn quote_venue(
             } else {
                 venue.quote_token.unwrap_or(USDC)
             };
+            // `v4PoolKey` derives currency0/1 by sorting (token, quote); the
+            // API row must agree or the swap direction below is wrong.
+            let (lo, hi) = if token < quote_currency {
+                (token, quote_currency)
+            } else {
+                (quote_currency, token)
+            };
+            if (key.currency0, key.currency1) != (lo, hi) {
+                return no_fill(venue, execution, net, "v4-pool-key-mismatch");
+            }
             let input_currency = match side {
                 Side::Buy => quote_currency,
                 Side::Sell => token,
@@ -333,7 +352,16 @@ pub fn quote(detail: &TokenDetail, side: Side, amount_in_raw: U256, slippage_bps
     let mut venues: Vec<VenueQuote> = detail
         .venues
         .iter()
-        .map(|venue| quote_venue(venue, detail.provenance, detail.address, side, net))
+        .map(|venue| {
+            quote_venue(
+                venue,
+                detail.provenance,
+                detail.address,
+                detail.quote_decimals,
+                side,
+                net,
+            )
+        })
         .collect();
     // Descending by output; a venue that could not answer sorts last (stable).
     venues.sort_by(|a, b| match (a.out_raw, b.out_raw) {

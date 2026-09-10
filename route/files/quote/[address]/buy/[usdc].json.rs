@@ -1,9 +1,11 @@
 // Best-execution BUY quote: API detail -> venues -> eth_call simulations at
 // gross minus the interface fee (external tokens only), ranked, with the
 // protected minimum output for the day-1 executable winner. Pure eth_calls
-// at the latest block; uncached (critique M8).
+// at the latest block with a 2 s cache (critique M8): a quote read has no
+// side effect, so it must not carry the audited side-effecting-read flag; a
+// write re-quotes before staging anyway.
 petal::route_file!(
-    spec: petal::chain_read_spec().caps(&["bloom:http", "bloom:chain"]),
+    spec: petal::http_read_spec(2_000).caps(&["bloom:http", "bloom:chain"]),
     read: |ctx: &petal::Ctx| {
         let address = match petal::param(ctx, "address").and_then(|value| {
             crate::amount::parse_route_address(value).map_err(|error| crate::err(-3, error))

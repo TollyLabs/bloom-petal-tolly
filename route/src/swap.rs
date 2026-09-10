@@ -49,6 +49,10 @@ pub struct BuyRequest {
     pub min_out_raw: Option<String>,
     #[serde(default)]
     pub allow_worse_venue: Option<bool>,
+    /// Required `true` to stage again after a stage whose record could not be
+    /// written (`stage_in_flight`); see AGENTS.md "Unrecorded stage".
+    #[serde(default)]
+    pub acknowledge_unrecorded_stage: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -67,6 +71,8 @@ pub struct SellRequest {
     pub min_out_raw: Option<String>,
     #[serde(default)]
     pub allow_worse_venue: Option<bool>,
+    #[serde(default)]
+    pub acknowledge_unrecorded_stage: Option<bool>,
 }
 
 /// Validated, side-independent intent.
@@ -80,6 +86,7 @@ struct Intent {
     venue: Option<String>,
     min_out_raw: Option<U256>,
     allow_worse_venue: bool,
+    acknowledge_unrecorded_stage: bool,
 }
 
 fn parse_body<T: for<'de> Deserialize<'de>>(body: &[u8]) -> Result<T, DispatchResponse> {
@@ -102,6 +109,7 @@ fn intent(
     venue: Option<String>,
     min_out_raw: Option<String>,
     allow_worse_venue: Option<bool>,
+    acknowledge_unrecorded_stage: Option<bool>,
 ) -> Result<Intent, DispatchResponse> {
     ops::validate_id(id).map_err(|e| petal::error(-3, e))?;
     let token = parse_any_address(token)
@@ -136,6 +144,7 @@ fn intent(
         venue: venue.map(|v| v.to_ascii_lowercase()),
         min_out_raw,
         allow_worse_venue: allow_worse_venue.unwrap_or(false),
+        acknowledge_unrecorded_stage: acknowledge_unrecorded_stage.unwrap_or(false),
     })
 }
 
@@ -158,6 +167,7 @@ pub fn route_buy(wallet: &str, body: &[u8]) -> DispatchResponse {
         request.venue,
         request.min_out_raw,
         request.allow_worse_venue,
+        request.acknowledge_unrecorded_stage,
     ) {
         Ok(intent) => advance(wallet, intent, echo),
         Err(r) => r,
@@ -183,6 +193,7 @@ pub fn route_sell(wallet: &str, body: &[u8]) -> DispatchResponse {
         request.venue,
         request.min_out_raw,
         request.allow_worse_venue,
+        request.acknowledge_unrecorded_stage,
     ) {
         Ok(intent) => advance(wallet, intent, echo),
         Err(r) => r,
@@ -206,7 +217,8 @@ pub fn buy_description(wallet: &str) -> DispatchResponse {
             "slippage_bps": format!("optional; {}..={}, default {}", policy::SLIPPAGE_MIN_BPS, policy::SLIPPAGE_MAX_BPS, policy::SLIPPAGE_DEFAULT_BPS),
             "venue": "optional; pin a venue id from the quote file",
             "min_out_raw": "optional; agent floor in raw token units; the larger of it and the fresh protected floor is used",
-            "allow_worse_venue": "optional; required true when the best venue is not executable day-1 (V4) or when pinning a venue that is not the winner"
+            "allow_worse_venue": "optional; required true when the best venue is not executable day-1 (V4) or when pinning a venue that is not the winner",
+            "acknowledge_unrecorded_stage": "optional; required true to stage again after the record reports stage_in_flight (an outbox entry this Petal staged but could not record)"
         },
         "limits": { "max_op_usdc": policy::MAX_OP_USDC_HUMAN, "interface_fee_bps_external_buys": INTERFACE_FEE_BPS },
         "quote_first": "quote/<token>/buy/<usdc>.json",
@@ -231,7 +243,8 @@ pub fn sell_description(wallet: &str) -> DispatchResponse {
             "slippage_bps": format!("optional; {}..={}, default {}", policy::SLIPPAGE_MIN_BPS, policy::SLIPPAGE_MAX_BPS, policy::SLIPPAGE_DEFAULT_BPS),
             "venue": "optional; pin a venue id from the quote file",
             "min_out_raw": "optional; agent floor in raw 6-decimal USDC; the larger of it and the fresh protected floor is used",
-            "allow_worse_venue": "optional; required true when the best venue is not executable day-1 (V4) or when pinning a venue that is not the winner"
+            "allow_worse_venue": "optional; required true when the best venue is not executable day-1 (V4) or when pinning a venue that is not the winner",
+            "acknowledge_unrecorded_stage": "optional; required true to stage again after the record reports stage_in_flight (an outbox entry this Petal staged but could not record)"
         },
         "limits": { "max_quoted_usdc_out": policy::MAX_OP_USDC_HUMAN },
         "quote_first": "quote/<token>/sell/<amount>.json",
@@ -396,7 +409,6 @@ fn advance(wallet: &str, intent: Intent, echo: Value) -> DispatchResponse {
             "operationId already bound to a different operation kind",
         );
     }
-    op.request = echo;
 
     // Reconcile what the host says about the latest attempt.
     match ops::reconcile(&mut op, network, now) {
@@ -414,19 +426,21 @@ fn advance(wallet: &str, intent: Intent, echo: Value) -> DispatchResponse {
         Status::Confirmed if op.step != Some(Step::Approve) => return DispatchResponse::Write,
         _ => {}
     }
+    // A stage this operation could not record may still be live in the
+    // outbox (critique M1): never stage again over it silently.
+    if let Err(r) = acknowledge_unrecorded_stage(&mut op, intent.acknowledge_unrecorded_stage, now)
+    {
+        return r;
+    }
     // Critique M1: never two live entries for one subject.
     match ops::live_conflict(wallet, kind, &addr_hex(intent.token), &intent.id) {
-        Ok(Some(other)) => {
-            return petal::error(
-                -2,
-                format!(
-                    "another operation ({other}) for this token still has a pending outbox entry; confirm or cancel it in Bloom first"
-                ),
-            );
-        }
+        Ok(Some(conflict)) => return petal::error(-2, conflict.message("this token")),
         Ok(None) => {}
         Err(e) => return petal::error(-4, e),
     }
+    // The body that drives this attempt (execution parameters may differ
+    // from the claim's; the economic tuple is digest-bound above).
+    op.request = echo;
 
     // Sell "all": freeze the balance at the first stage.
     let amount_in = match amount_spec {
@@ -536,11 +550,14 @@ fn advance(wallet: &str, intent: Intent, echo: Value) -> DispatchResponse {
             CrossCheck::Unavailable(e) => format!("tollFor cross-check unavailable: {e}"),
             _ => unreachable!(),
         };
-        let retryable = matches!(quote.cross_check, CrossCheck::Unavailable(_));
+        let (code, retryable) = match quote.cross_check {
+            CrossCheck::Unavailable(_) => ("fee-check-unavailable", true),
+            _ => ("fee-mismatch", false),
+        };
         return record_failure(
             &mut op,
             Step::Swap,
-            &fail(-4, "fee-mismatch", message, retryable),
+            &fail(-4, code, message, retryable),
             now,
         );
     }
@@ -741,7 +758,7 @@ fn advance(wallet: &str, intent: Intent, echo: Value) -> DispatchResponse {
             return record_failure(
                 &mut op,
                 Step::Swap,
-                &fail(-4, "quote-unavailable", "unknown router call", false),
+                &fail(-4, "execution-plan-invalid", "unknown router call", false),
                 now,
             );
         }
@@ -752,7 +769,7 @@ fn advance(wallet: &str, intent: Intent, echo: Value) -> DispatchResponse {
             Step::Swap,
             &fail(
                 -4,
-                "quote-unavailable",
+                "execution-plan-invalid",
                 "a V2 swap needs the API factory and a non-zero floor",
                 false,
             ),
@@ -882,6 +899,43 @@ fn choose_venue<'a>(quote: &'a Quote, intent: &Intent) -> Result<&'a VenueQuote,
     Ok(chosen)
 }
 
+/// Gate on `stage_in_flight`: refuse unless the agent acknowledged it, in
+/// which case the marker moves to `unrecorded_stages` (audit) and the
+/// operation may stage again. Shared with `launch`.
+pub(crate) fn acknowledge_unrecorded_stage(
+    op: &mut Operation,
+    acknowledged: bool,
+    now: u64,
+) -> Result<(), DispatchResponse> {
+    let Some(marker) = op.stage_in_flight.clone() else {
+        return Ok(());
+    };
+    if !acknowledged {
+        return Err(petal::error(
+            -2,
+            format!(
+                "unrecorded-stage: a {} transaction to {} was staged at {} ms but its record could not be written; inspect the wallet's outbox under /bloom/wallets/{}/chains/arc/outbox/ (confirm or cancel that entry), then re-POST with acknowledge_unrecorded_stage:true",
+                serde_json::to_value(marker.step)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_default(),
+                marker.to,
+                marker.staged_ms,
+                op.wallet
+            ),
+        ));
+    }
+    op.unrecorded_stages.push(marker);
+    op.stage_in_flight = None;
+    op.note = Some(
+        "an unrecorded stage was acknowledged; its outbox entry (if any) lives only in Bloom"
+            .into(),
+    );
+    op.updated_ms = now;
+    op.finalize_next_action();
+    ops::save(op).map_err(|e| petal::error(-4, e))
+}
+
 /// Stage one transaction and persist the attempt. Shared with `launch`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stage_step(
@@ -896,11 +950,23 @@ pub(crate) fn stage_step(
     balance_before: Option<U256>,
     now: u64,
 ) -> DispatchResponse {
-    // Persist the plan (and any superseding) before the host effect so a retry
-    // that observes this record knows an attempt was in flight.
+    // Persist the plan, the live index and the in-flight marker BEFORE the
+    // host effect: if the save after `tx_stage` fails, the marker is what
+    // stops a re-POST from staging a second live entry (the re-quote would
+    // produce different calldata, which the host does not de-duplicate).
+    let subject = op.subject();
+    if let Err(e) = ops::live_index_set(wallet, op.kind, &subject, &op.id) {
+        return petal::error(-4, e);
+    }
     op.status = Status::Created;
     op.step = Some(step);
     op.error = None;
+    op.stage_in_flight = Some(ops::StageMarker {
+        step,
+        to: addr_hex(to),
+        data_sha256: ops::sha256_hex(data),
+        staged_ms: now,
+    });
     op.updated_ms = now;
     op.finalize_next_action();
     if let Err(e) = ops::save(op) {
@@ -908,7 +974,9 @@ pub(crate) fn stage_step(
     }
     let staged = match tx::stage(wallet, to, data) {
         Ok(s) => s,
+        // The engine returned an error: nothing was staged, the marker lifts.
         Err(StageError::Denied(message)) => {
+            op.stage_in_flight = None;
             let code = if message.to_ascii_lowercase().contains("valuation") {
                 "valuation-unavailable"
             } else {
@@ -927,6 +995,7 @@ pub(crate) fn stage_step(
             );
         }
         Err(StageError::Backend(message)) => {
+            op.stage_in_flight = None;
             return record_failure(
                 op,
                 step,
@@ -964,15 +1033,17 @@ pub(crate) fn stage_step(
     op.next_action = NextAction::ConfirmInBloom;
     op.error = None;
     op.note = None;
+    op.stage_in_flight = None;
     op.updated_ms = now;
-    if let Err(e) = ops::save(op) {
-        // The tx IS staged. The record still says `created`; a retry re-stages
-        // byte-identical calldata, which the host de-duplicates while the
-        // pending entry lives. Surface the outbox id for manual reconciliation.
+    // The tx IS staged. Try the save twice; if it still fails the durable
+    // record keeps `created` + `stage_in_flight`, so the next POST refuses
+    // until the agent inspects the outbox and acknowledges (see
+    // `acknowledge_unrecorded_stage`).
+    if let Err(e) = ops::save(op).or_else(|_| ops::save(op)) {
         return petal::error(
             -4,
             format!(
-                "transaction staged (outbox_id={}) but the record could not be written: {e}; inspect the outbox before retrying",
+                "transaction staged (outbox_id={}) but the record could not be written: {e}; inspect the outbox, then re-POST with acknowledge_unrecorded_stage:true",
                 staged.outbox_id
             ),
         );

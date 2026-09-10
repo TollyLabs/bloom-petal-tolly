@@ -42,9 +42,10 @@ pub const MARKETS_LIMIT: u32 = 50;
 pub const POSITIONS_MAX_OPS: usize = 200;
 pub const POSITIONS_MAX_TOKENS: usize = 32;
 
-/// Other operations of the same wallet inspected for a live outbox entry
-/// before a new one is staged (critique M1).
-pub const LIVE_SCAN_MAX_OPS: usize = 64;
+/// Most operation records loaded per listing read (`recent`); a wallet with
+/// more ids reports `scan_truncated: true`. The live-entry check (critique
+/// M1) does not scan: it reads the `tolly/live/` index.
+pub const OPS_SCAN_MAX_OPS: usize = 1_000;
 
 /// Runtime setting that enables writes. Lives in the user's
 /// `[petals.runtime.tolly.values]`; any Bloom user can flip it.

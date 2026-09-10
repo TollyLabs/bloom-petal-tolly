@@ -34,9 +34,11 @@ pub fn positions_document(wallet: &str) -> DispatchResponse {
 
     // Tokens from this wallet's operations: frozen symbol/decimals, no extra reads.
     let mut tokens: Vec<(Address, Option<String>, u32, String)> = Vec::new();
-    match ops::recent(wallet, POSITIONS_MAX_OPS) {
-        Ok(operations) => {
-            for op in operations {
+    let mut scan = json!({});
+    match ops::recent(wallet, None, POSITIONS_MAX_OPS) {
+        Ok(recent) => {
+            scan = json!({ "scanned": recent.scanned, "scan_truncated": recent.truncated });
+            for op in recent.ops {
                 let (token, symbol, decimals) = match op.kind {
                     Kind::Buy | Kind::Sell => (
                         op.plan.token.clone(),
@@ -103,7 +105,7 @@ pub fn positions_document(wallet: &str) -> DispatchResponse {
             "erc20_matches_native": native18_to_usdc6(native) == erc20,
         },
         "tokens": holdings,
-        "bounds": { "max_operations_scanned": POSITIONS_MAX_OPS, "max_tokens": POSITIONS_MAX_TOKENS },
+        "bounds": { "max_operations_scanned": POSITIONS_MAX_OPS, "max_tokens": POSITIONS_MAX_TOKENS, "scan": scan },
         "checked_ms": host::now_ms(),
     }))
 }

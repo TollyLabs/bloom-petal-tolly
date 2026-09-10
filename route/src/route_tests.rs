@@ -660,6 +660,7 @@ fn buy_walk_approve_then_swap_with_gross_and_fresh_floor() {
         read_json(ops::read_operation(WALLET, "buy-1", Network::Stage))["status"],
         "completed"
     );
+    fake_host::with(|h| h.assert_chain_calls_allowlisted());
 }
 
 #[test]
@@ -771,25 +772,123 @@ fn stage_denial_is_terminal_and_backend_failure_is_retryable() {
     assert_eq!(route_buy(WALLET, &body), DispatchResponse::Write);
     fake_host::with(|h| assert_eq!(h.staged.len(), 1));
     assert_eq!(record("buy-3")["status"], "staged");
+
+    // A transport message that merely contains "policy" is NOT a denial.
+    let mut host = host_for_barc_buy();
+    host.fail_next_stage(SdkError::Message(
+        "stage EVM outbox: rpc: rpc-policy provider timed out".into(),
+    ));
+    fake_host::install(host);
+    assert_eq!(code(&route_buy(WALLET, &body)), -4);
+    let rec = record("buy-3");
+    assert_eq!(rec["error"]["code"], "stage-failed");
+    assert_eq!(rec["error"]["retryable"], true);
 }
 
 #[test]
-fn persist_failure_after_stage_reports_the_outbox_id() {
+fn persist_failure_after_stage_blocks_reposts_until_acknowledged() {
     let mut host = host_for_barc_buy();
-    host.fail_store_after = Some(2); // claim + pre-stage save succeed, the post-stage save fails
+    // claim + live index + pre-stage save succeed; the post-stage save (and
+    // its retry) fail.
+    host.fail_store_after = Some(3);
     fake_host::install(host);
-    let r = route_buy(
-        WALLET,
-        &buy_body("buy-4", "25", json!({"allow_worse_venue": true})),
-    );
+    let body = buy_body("buy-4", "25", json!({"allow_worse_venue": true}));
+    let r = route_buy(WALLET, &body);
     assert_eq!(code(&r), -4);
     assert!(message(&r).contains("outbox_id=ob-1"), "{}", message(&r));
+    assert!(message(&r).contains("acknowledge_unrecorded_stage"));
     fake_host::with(|h| assert_eq!(h.staged.len(), 1));
+    let rec = record("buy-4");
     assert_eq!(
-        record("buy-4")["status"],
-        "created",
+        rec["status"], "created",
         "the record never claims the stage it could not persist"
     );
+    assert_eq!(rec["next_action"], "inspect");
+    assert_eq!(rec["stage_in_flight"]["step"], "approve");
+    assert_eq!(rec["stage_in_flight"]["to"], addr_hex(USDC));
+    assert_eq!(
+        rec["stage_in_flight"]["data_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(rec["txs"], json!([]));
+
+    // The store is back. A plain re-POST refuses instead of staging a second
+    // live entry for the same operation (M1).
+    fake_host::with(|h| h.fail_store_after = None);
+    let r = route_buy(WALLET, &body);
+    assert_eq!(code(&r), -2, "{}", message(&r));
+    assert!(message(&r).contains("unrecorded-stage"));
+    fake_host::with(|h| assert_eq!(h.staged.len(), 1));
+    // Another operation for the same token is blocked by the live index too.
+    let r = route_buy(
+        WALLET,
+        &buy_body("buy-4b", "10", json!({"allow_worse_venue": true})),
+    );
+    assert_eq!(code(&r), -2, "{}", message(&r));
+    assert!(message(&r).contains("buy-4") && message(&r).contains("could not record"));
+    fake_host::with(|h| assert_eq!(h.staged.len(), 1));
+
+    // Acknowledged: the marker moves to the audit list and the step stages.
+    let r = route_buy(
+        WALLET,
+        &buy_body(
+            "buy-4",
+            "25",
+            json!({"allow_worse_venue": true, "acknowledge_unrecorded_stage": true}),
+        ),
+    );
+    assert_eq!(r, DispatchResponse::Write, "{}", message(&r));
+    fake_host::with(|h| assert_eq!(h.staged.len(), 2));
+    let rec = record("buy-4");
+    assert_eq!(rec["status"], "staged");
+    assert_eq!(rec["stage_in_flight"], Value::Null);
+    assert_eq!(rec["unrecorded_stages"].as_array().unwrap().len(), 1);
+    assert_eq!(rec["unrecorded_stages"][0]["step"], "approve");
+    assert_eq!(rec["txs"][0]["outbox_id"], "ob-2");
+}
+
+#[test]
+fn stage_errors_lift_the_in_flight_marker() {
+    let mut host = host_for_barc_buy();
+    host.fail_next_stage(SdkError::Message(
+        "stage EVM outbox: provider timed out".into(),
+    ));
+    fake_host::install(host);
+    let body = buy_body("buy-4c", "25", json!({"allow_worse_venue": true}));
+    assert_eq!(code(&route_buy(WALLET, &body)), -4);
+    let rec = record("buy-4c");
+    assert_eq!(rec["error"]["code"], "stage-failed");
+    assert_eq!(
+        rec["stage_in_flight"],
+        Value::Null,
+        "nothing was staged, nothing to acknowledge"
+    );
+    assert_eq!(route_buy(WALLET, &body), DispatchResponse::Write);
+}
+
+#[test]
+fn claim_race_reports_the_existing_record() {
+    fake_host::install(host_for_barc_buy());
+    let op = ops::Operation::new(
+        "race-1",
+        WALLET,
+        wallet_address(),
+        Kind::Buy,
+        Network::Stage,
+        "d".into(),
+        json!({}),
+        NOW,
+    );
+    assert_eq!(ops::claim(&op), Ok(true));
+    assert_eq!(
+        ops::claim(&op),
+        Ok(false),
+        "the daemon's 'already exists' message is not a failure"
+    );
+    assert!(ops::load(WALLET, "race-1").unwrap().is_some());
 }
 
 #[test]
@@ -837,6 +936,24 @@ fn toll_for_mismatch_refuses_the_write() {
     assert_eq!(code(&r), -4, "{}", message(&r));
     assert!(message(&r).contains("fee-mismatch"));
     assert_eq!(record("buy-6")["error"]["retryable"], false);
+    fake_host::with(|h| assert!(h.staged.is_empty()));
+
+    // An unavailable cross-check is a different, retryable code.
+    let mut host = host_for_barc_buy();
+    host.replace_chain(
+        "eth_call",
+        Some(MULTI_ROUTER),
+        "0d9a9972",
+        Err(SdkError::Message("eth_call: timeout".into())),
+    );
+    fake_host::install(host);
+    let r = route_buy(
+        WALLET,
+        &buy_body("buy-6b", "25", json!({"allow_worse_venue": true})),
+    );
+    assert_eq!(code(&r), -4, "{}", message(&r));
+    assert!(message(&r).contains("fee-check-unavailable"));
+    assert_eq!(record("buy-6b")["error"]["retryable"], true);
     fake_host::with(|h| assert!(h.staged.is_empty()));
 }
 
@@ -1018,6 +1135,167 @@ fn reverted_swap_is_retried_with_a_superseded_attempt() {
 }
 
 #[test]
+fn confirmed_swaps_never_regress_when_the_outbox_forgets_them() {
+    fake_host::install(host_for_barc_buy());
+    let body = buy_body("buy-c", "25", json!({"allow_worse_venue": true}));
+    fake_host::with(|h| {
+        h.reply_chain(
+            "eth_call",
+            Some(USDC),
+            "dd62ed3e",
+            Ok(serde_json::to_string(&format!("0x{:064x}", GROSS)).unwrap()),
+        );
+        let _ = h.chain("eth_call", &json!([{ "to": addr_hex(USDC), "data": abi::hex0x(&abi::erc20_allowance(wallet_address(), MULTI_ROUTER)) }, "latest"]).to_string());
+    });
+    assert_eq!(route_buy(WALLET, &body), DispatchResponse::Write);
+    assert_eq!(record("buy-c")["step"], "swap");
+    fake_host::with(|h| {
+        h.set_outbox(
+            "ob-1",
+            "success",
+            Some("0xf1"),
+            Some(&json!({"outcome": "success", "tx_hash": "0xf1", "block_number": 7})),
+        );
+    });
+    // Mined, but the BARC balance still reads 0 (scripted): a buy without a
+    // visible output stays `confirmed`, it is never promoted on a zero delta.
+    let doc = read_json(ops::read_operation(WALLET, "buy-c", Network::Stage));
+    assert_eq!(doc["status"], "confirmed");
+    assert_eq!(doc["result"], Value::Null);
+    assert!(doc["note"].as_str().unwrap().contains("did not increase"));
+    assert_eq!(doc["txs"][0]["outcome"], "success");
+    // The host forgets the entry: the recorded receipt wins, no `unknown`.
+    fake_host::with(|h| {
+        h.remove_outbox("ob-1");
+        h.replace_chain(
+            "eth_call",
+            Some(barc()),
+            &hex(&abi::erc20_balance_of(wallet_address())),
+            Ok(serde_json::to_string(&format!("0x{:064x}", V3_500_OUT)).unwrap()),
+        );
+    });
+    let doc = read_json(ops::read_operation(WALLET, "buy-c", Network::Stage));
+    assert_eq!(doc["status"], "completed");
+    assert_eq!(doc["result"]["method"], "balance_delta");
+    assert_eq!(doc["result"]["net_of_gas"], false);
+    assert_eq!(doc["result"]["amount_out_raw"], V3_500_OUT.to_string());
+    // A no-op re-POST does not overwrite the stored request body.
+    assert_eq!(
+        route_buy(
+            WALLET,
+            &buy_body(
+                "buy-c",
+                "25",
+                json!({"allow_worse_venue": true, "slippage_bps": 300})
+            )
+        ),
+        DispatchResponse::Write
+    );
+    assert_eq!(record("buy-c")["request"]["slippage_bps"], Value::Null);
+}
+
+#[test]
+fn sell_completion_is_labelled_net_of_gas_and_completes_at_zero_delta() {
+    fake_host::install(host_for_barc_buy());
+    let mut op = ops::Operation::new(
+        "sell-n",
+        WALLET,
+        wallet_address(),
+        Kind::Sell,
+        Network::Stage,
+        "d".into(),
+        json!({}),
+        NOW,
+    );
+    op.plan.token = Some(addr_hex(barc()));
+    op.plan.decimals = Some(18);
+    op.txs.push(ops::TxEntry {
+        role: Step::Swap,
+        to: addr_hex(MULTI_ROUTER),
+        outbox_id: "ob-9".into(),
+        confirm_path: crate::tx::confirm_path(WALLET, "ob-9"),
+        staged_ms: NOW,
+        outbox_state: "pending".into(),
+        tx_hash: None,
+        outcome: None,
+        block_number: None,
+        revert_reason: None,
+        superseded: false,
+        attempt_params: json!({}),
+        spender: None,
+        amount_raw: Some("1".into()),
+        balance_before_raw: Some("100000000".into()), // the scripted ERC-20 USDC balance
+        plan_md: String::new(),
+    });
+    op.status = Status::Staged;
+    op.step = Some(Step::Swap);
+    op.finalize_next_action();
+    fake_host::with(|h| {
+        h.seed_state(&ops::store_key(WALLET, "sell-n"), &op);
+        h.set_outbox(
+            "ob-9",
+            "success",
+            Some("0x99"),
+            Some(&json!({"outcome": "success", "tx_hash": "0x99", "block_number": 3})),
+        );
+    });
+    let doc = read_json(ops::read_operation(WALLET, "sell-n", Network::Stage));
+    assert_eq!(doc["status"], "completed");
+    assert_eq!(doc["result"]["method"], "balance_delta_net_of_gas");
+    assert_eq!(doc["result"]["net_of_gas"], true);
+    assert_eq!(doc["result"]["token_out"], addr_hex(USDC));
+    assert_eq!(doc["result"]["amount_out_raw"], "0");
+    assert!(doc["note"].as_str().unwrap().contains("net of the gas"));
+}
+
+#[test]
+fn v4_venues_need_a_matching_pool_key_and_quote_representation() {
+    // Quote representation: the API's canonical market is 6-decimal here, so
+    // the native-quote V4 pool is ticketed out and cannot be `best`.
+    let mut detail = barc_detail();
+    detail["quoteDecimals"] = json!(6);
+    let mut host = host_for_barc_buy();
+    host.reply_http(BARC_URL, 200, &detail);
+    fake_host::install(host);
+    fake_host::with(|h| {
+        let _ = h.fetch_for_test(BARC_URL);
+    });
+    let parsed = token_detail(Network::Stage, barc()).unwrap();
+    let q = quote::quote(&parsed, Side::Buy, u(GROSS), 500);
+    let v4 = q
+        .venues
+        .iter()
+        .find(|v| v.venue.kind.name() == "v4")
+        .unwrap();
+    assert_eq!(v4.error.as_deref(), Some("quote-decimals-mismatch"));
+    assert_eq!(
+        q.best, q.best_executable,
+        "the V3 500 tier is best outright"
+    );
+    assert!(q.warnings.iter().all(|w| !w.contains("allow_worse_venue")));
+    fake_host::with(|h| assert!(h.eth_calls_to(V4_QUOTER).is_empty()));
+
+    // Pool key: currency0/1 must be the sorted (token, quote) pair.
+    let mut detail = barc_detail();
+    detail["pools"][0]["currency1"] = json!("0x1111111111111111111111111111111111111111");
+    let mut host = host_for_barc_buy();
+    host.reply_http(BARC_URL, 200, &detail);
+    fake_host::install(host);
+    fake_host::with(|h| {
+        let _ = h.fetch_for_test(BARC_URL);
+    });
+    let parsed = token_detail(Network::Stage, barc()).unwrap();
+    let q = quote::quote(&parsed, Side::Buy, u(GROSS), 500);
+    let v4 = q
+        .venues
+        .iter()
+        .find(|v| v.venue.kind.name() == "v4")
+        .unwrap();
+    assert_eq!(v4.error.as_deref(), Some("v4-pool-key-mismatch"));
+    fake_host::with(|h| assert!(h.eth_calls_to(V4_QUOTER).is_empty()));
+}
+
+#[test]
 fn unknown_outbox_entries_never_regress_or_restage() {
     fake_host::install(host_for_barc_buy());
     let body = buy_body("buy-u", "25", json!({"allow_worse_venue": true}));
@@ -1046,8 +1324,11 @@ fn buy_description_lists_recent_operations_and_the_gate() {
     let doc = read_json(buy_description(WALLET));
     assert_eq!(doc["writes_enabled"], true);
     assert_eq!(doc["limits"]["max_op_usdc"], "250");
-    assert_eq!(doc["recent"][0]["id"], "buy-d");
-    assert_eq!(doc["recent"][0]["status"], "staged");
+    assert_eq!(doc["recent"]["operations"][0]["id"], "buy-d");
+    assert_eq!(doc["recent"]["operations"][0]["status"], "staged");
+    assert_eq!(doc["recent"]["scanned"], 1);
+    assert_eq!(doc["recent"]["scan_truncated"], false);
+    assert!(doc["body"]["acknowledge_unrecorded_stage"].is_string());
     assert_eq!(ops::list_ids(WALLET).unwrap(), vec!["buy-d".to_string()]);
     assert_eq!(ops::list_wallets().unwrap(), vec![WALLET.to_string()]);
 }
@@ -1418,7 +1699,48 @@ fn launch_with_dev_buy_approves_the_pad_first_and_completes_from_the_index() {
                 .all(|c| c.url.starts_with("https://stage.tollylabs.com/api/")),
             "only the stage API is reached"
         );
+        h.assert_chain_calls_allowlisted();
     });
+}
+
+#[test]
+fn launch_completion_survives_an_api_outage() {
+    fake_host::install(host_for_launch());
+    assert_eq!(
+        route_launch(WALLET, &launch_body("launch-out", "0")),
+        DispatchResponse::Write
+    );
+    fake_host::with(|h| {
+        h.set_outbox(
+            "ob-1",
+            "success",
+            Some("0xe1"),
+            Some(&json!({"outcome": "success", "tx_hash": "0xe1", "block_number": 20188730})),
+        );
+        let url = ApiRoute::LaunchesByCreator(wallet_address()).url(Network::Stage);
+        h.reply_http(&url, 500, &json!({"error": "boom"}));
+        h.reply_http(&url, 200, &markets());
+    });
+    // API down: the read still returns the durable record, confirmed + note.
+    let doc = read_json(ops::read_operation(WALLET, "launch-out", Network::Stage));
+    assert_eq!(doc["status"], "confirmed");
+    assert_eq!(doc["next_action"], "wait");
+    assert!(
+        doc["note"]
+            .as_str()
+            .unwrap()
+            .contains("completion evidence unavailable"),
+        "{}",
+        doc["note"]
+    );
+    // The receipt is final: the entry is not inspected again, and once the
+    // outbox forgets it the record does not regress.
+    fake_host::with(|h| {
+        h.remove_outbox("ob-1");
+    });
+    let doc = read_json(ops::read_operation(WALLET, "launch-out", Network::Stage));
+    assert_eq!(doc["status"], "completed");
+    assert_eq!(doc["result"]["method"], "creator-index-block");
 }
 
 #[test]
@@ -1468,7 +1790,10 @@ fn positions_report_both_usdc_views_and_touched_tokens() {
     assert_eq!(doc["tokens"][0]["symbol"], "BARC");
     assert_eq!(doc["tokens"][0]["balance_human"], "5");
     assert_eq!(doc["bounds"]["max_tokens"], policy::POSITIONS_MAX_TOKENS);
+    assert_eq!(doc["bounds"]["scan"]["scanned"], 1);
+    assert_eq!(doc["bounds"]["scan"]["scan_truncated"], false);
     fake_host::with(|h| {
+        h.assert_chain_calls_allowlisted();
         let symbol_calls = h
             .chain_calls
             .iter()

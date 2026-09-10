@@ -254,6 +254,40 @@ impl FakeHost {
         self.chain_calls.iter().map(|c| c.method.as_str()).collect()
     }
 
+    /// Critique B1: every chain read this host saw used an allowlisted method
+    /// (`eth_call`/`eth_getBalance`) at the `latest` block.
+    pub fn assert_chain_calls_allowlisted(&self) {
+        assert!(!self.chain_calls.is_empty(), "no chain call recorded");
+        for call in &self.chain_calls {
+            assert!(
+                matches!(call.method.as_str(), "eth_call" | "eth_getBalance"),
+                "method {} is not allowlisted",
+                call.method
+            );
+            assert_eq!(
+                call.params[1].as_str(),
+                Some("latest"),
+                "{} must read the latest block: {}",
+                call.method,
+                call.params
+            );
+        }
+    }
+
+    /// Consume one scripted HTTP reply for `url` (tests that script a
+    /// second, different reply for the same URL).
+    pub fn fetch_for_test(&mut self, url: &str) -> Result<HttpResponse, SdkError> {
+        let request = HttpRequest {
+            method: "GET".into(),
+            url: url.to_owned(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let response = self.fetch(&request);
+        self.http_calls.pop();
+        response
+    }
+
     // ---- behaviour ----
 
     fn writable(&mut self) -> Result<(), SdkError> {
@@ -440,10 +474,24 @@ pub fn store_put_new(key: &str, value: &[u8]) -> Result<(), SdkError> {
     with(|host| {
         host.writable()?;
         if host.state.contains_key(key) {
-            return Err(SdkError::Host(HostStatus::Denied));
+            // The daemon's wording (`vm.rs` component_store_put_new test):
+            // the SDK surfaces it as a plain message, not a status.
+            return Err(SdkError::Message(format!(
+                "store put_new: key {key} already exists"
+            )));
         }
         host.state.insert(key.to_owned(), value.to_vec());
         Ok(())
+    })
+}
+
+pub fn store_del(key: &str) -> Result<(), SdkError> {
+    with(|host| {
+        host.writable()?;
+        host.state
+            .remove(key)
+            .map(|_| ())
+            .ok_or(SdkError::Host(HostStatus::NotFound))
     })
 }
 

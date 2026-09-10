@@ -1,8 +1,8 @@
 // Best-execution SELL quote (token -> USDC, no interface fee). Outputs are
 // normalised to 6-decimal USDC before ranking; a native-quote V4 venue's raw
-// 18-decimal output is reported alongside.
+// 18-decimal output is reported alongside. Pure read, 2 s cache (M8).
 petal::route_file!(
-    spec: petal::chain_read_spec().caps(&["bloom:http", "bloom:chain"]),
+    spec: petal::http_read_spec(2_000).caps(&["bloom:http", "bloom:chain"]),
     read: |ctx: &petal::Ctx| {
         let address = match petal::param(ctx, "address").and_then(|value| {
             crate::amount::parse_route_address(value).map_err(|error| crate::err(-3, error))

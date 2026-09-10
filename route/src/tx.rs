@@ -54,6 +54,12 @@ pub fn stage(wallet: &str, to: Address, data: &[u8]) -> Result<StagedTransaction
         max_fee_per_gas: None,
         max_priority_fee_per_gas: None,
     };
+    // The daemon renders the engine's error as `backend: stage EVM outbox:
+    // <TxEngineError>`; the SDK's `host_err` turns anything containing
+    // "denied" (`policy denied`, `approval denied: ...`, capability denials)
+    // into `HostStatus::Denied` before it reaches us, so only the engine's
+    // exact `valuation unavailable: ...` wording is matched here. Everything
+    // else (RPC, transport, simulation) is a retryable backend failure.
     match host::tx_stage(&request) {
         Ok(staged) => Ok(staged),
         Err(SdkError::Host(HostStatus::Denied)) => {
@@ -61,8 +67,10 @@ pub fn stage(wallet: &str, to: Address, data: &[u8]) -> Result<StagedTransaction
         }
         Err(e) => {
             let message = sanitize_host_error(&e.message());
-            let lower = message.to_ascii_lowercase();
-            if lower.contains("denied") || lower.contains("policy") || lower.contains("valuation") {
+            if message
+                .to_ascii_lowercase()
+                .contains("valuation unavailable")
+            {
                 Err(StageError::Denied(message))
             } else {
                 Err(StageError::Backend(message))

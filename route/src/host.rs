@@ -40,6 +40,9 @@ mod real {
     pub fn store_put_new(key: &str, value: &[u8]) -> Result<(), SdkError> {
         petal::sdk::store_put_new(key, value, false)
     }
+    pub fn store_del(key: &str) -> Result<(), SdkError> {
+        petal::sdk::store_del(key)
+    }
     pub fn store_list(prefix: &str, max_bytes: usize) -> Result<Vec<String>, SdkError> {
         petal::sdk::store_list(prefix, max_bytes)
     }
@@ -59,12 +62,12 @@ mod real {
 
 #[cfg(not(test))]
 pub use real::{
-    chain_read, http_fetch, now_ms, random_bytes, runtime_setting, store_get, store_list,
-    store_put, store_put_new, tx_inspect, tx_stage, vfs_read,
+    chain_read, http_fetch, now_ms, random_bytes, runtime_setting, store_del, store_get,
+    store_list, store_put, store_put_new, tx_inspect, tx_stage, vfs_read,
 };
 
 #[cfg(test)]
 pub use crate::fake_host::{
-    chain_read, http_fetch, now_ms, random_bytes, runtime_setting, store_get, store_list,
-    store_put, store_put_new, tx_inspect, tx_stage, vfs_read,
+    chain_read, http_fetch, now_ms, random_bytes, runtime_setting, store_del, store_get,
+    store_list, store_put, store_put_new, tx_inspect, tx_stage, vfs_read,
 };

@@ -13,7 +13,5 @@ package = "bloom-petal-sdk"
 git = "https://github.com/bloom-directory/petal"
 rev = "73c5b06a77599368fbc79fb7947a629b5b4c630e"
 
-# Crates route files reference directly. Everything else is reached through
-# `crate::*` (the shared route crate) and lives in route/Cargo.toml.
-[dependencies]
-serde_json = "1"
+# Route files reference only `petal::*` and `crate::*` (the shared route
+# crate); every third-party crate lives in route/Cargo.toml.
