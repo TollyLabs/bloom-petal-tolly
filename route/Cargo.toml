@@ -2,8 +2,18 @@
 name = "tolly-route"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 publish = false
+
+[lib]
+crate-type = ["rlib"]
 
 [dependencies]
 petal = { package = "bloom-petal-sdk", git = "https://github.com/bloom-directory/petal", rev = "73c5b06a77599368fbc79fb7947a629b5b4c630e" }
+alloy-primitives = { version = "=1.6.1", default-features = false, features = ["std"] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_jcs = "0.2"
+sha2 = "0.11"
+sha3 = "0.10"
