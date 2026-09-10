@@ -1,0 +1,18 @@
+schema = "bloom.petal.build.v1"
+name = "tolly"
+routes = "route/files"
+output = "petal/tolly"
+
+[route_crate]
+package = "tolly-route"
+path = "route"
+alias = "example_route"
+
+[sdk]
+package = "bloom-petal-sdk"
+git = "https://github.com/bloom-directory/petal"
+rev = "73c5b06a7759"
+
+[dependencies]
+serde_json = "1"
+

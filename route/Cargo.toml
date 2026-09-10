@@ -1,0 +1,9 @@
+[package]
+name = "tolly-route"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+petal = { package = "bloom-petal-sdk", git = "https://github.com/bloom-directory/petal", rev = "73c5b06a7759" }
+serde_json = "1"

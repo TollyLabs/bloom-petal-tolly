@@ -1,0 +1,5 @@
+# build products (petal build / petal package)
+petal/
+dist/
+target/
+route/target/
