@@ -18,20 +18,24 @@ Petal writes asynchronously, and the route's answer, refusal or not, is
 logged by the daemon and never returned to the writer. A write that
 "succeeded" may have staged nothing. So, immediately after every write:
 
-1. read `wallets/<wallet>/operations/<operationId>.json`. It exists for every
-   write whose body parsed and whose `operationId` was usable, and it says
-   what happened: `status`, `error`, `next_action`, `last_write_ms`, and, on
-   a record that was already live or terminal, the newest refusals in
-   `refusals[]`;
-2. if it does not exist, read the route file you wrote to (`buy.json`,
-   `sell.json`, `launch.json`): its `last_write` names the last write to any
-   of this wallet's three routes, with the error and why no record was
-   written (body did not parse, invalid `operationId`, `operationId` bound to
-   a different request).
+1. read the route file you wrote to (`buy.json`, `sell.json`,
+   `launch.json`): its `last_write` describes the last write to any of this
+   wallet's three routes. Check that `body_sha256` equals the sha256 of the
+   bytes you wrote; if not, another write overtook yours — read the record
+   and compare `last_write_ms`. `outcome` / `error` say how the write ended,
+   and `record_effect` / `note` say whether and where that outcome landed
+   (`created`, `failed`, `refusal_appended`, `accepted`, or `none` with the
+   reason: body did not parse, invalid `operationId`, `operationId` bound to
+   a different request or kind, record could not be matched);
+2. if `record` is set, read `wallets/<wallet>/operations/<operationId>.json`:
+   `status`, `error`, `next_action`, `last_write_ms`, and, on a record that
+   was already live or terminal, the newest refusals in `refusals[]`.
 
-Only `bloom vfs write <path> --data '...'` returns the route's error
-synchronously (exit 1); the mount does not. Do not treat a silent write as
-a staged transaction.
+Do not read the record alone: a record can exist and be untouched by your
+write (`record_effect: none`), and a stale `staged` or `failed` there would
+tell you the wrong story. Only `bloom vfs write <path> --data '...'` returns
+the route's error synchronously (exit 1); the mount does not. Do not treat
+a silent write as a staged transaction.
 
 ## Paths
 
@@ -180,16 +184,31 @@ not returned on the mount:
   `refusals[]` (`ts_ms`, `response_code`, `code`, `message`, `retryable`;
   newest 8). A `refusals[]` entry newer than the last `txs[]` attempt means
   your last write did nothing;
+- a bound record with nothing staged and no `stage_in_flight` also takes a
+  refusal whose tuple could not be computed offline (a decimal-amount sell
+  before the record planned the token's decimals, an unparseable token or
+  amount): nothing is protected, so the stale error is replaced;
 - no record for that `operationId` yet: one is created, `failed`, unbound.
+  Its `network` is the one the owner asked for at the time (`stage`,
+  `prod`, `invalid` when `tolly_network` names no network, `unavailable`
+  when it could not be read); the first write past the gates replaces it
+  with the network the stage actually ran on.
 
 Refusals that cannot reach a record (body did not parse, invalid
 `operationId`, id bound to a different request or kind, wallet address
-unreadable) are visible only in the route file's `last_write`:
+unreadable, a live or in-flight record whose tuple this write could not
+compute) are visible only in the route file's `last_write`:
 `{route, ts_ms, outcome, response_code, operationId, body_sha256,
 body_bytes, error{code,message,retryable}, record, record_effect, note}`
 with `record_effect` one of `created | failed | refusal_appended | accepted
 | none` (`note` says why `none`). The marker is per wallet and shared by the
 three routes; an accepted write overwrites it too.
+
+Known window: two writes for the SAME `operationId` in flight at once (one
+staging, one refused) may leave the refusal's `failed` over the stager's
+pre-stage save; the store has no compare-and-swap. Serialize writes per
+operation — one write, one read, then the next — and never re-POST while a
+previous write to the same id has not been read back.
 
 `step` ∈ `approve | swap | create`. `txs[]` keeps every attempt (audit):
 `outbox_id`, `confirm_path`, `outbox_state`, `tx_hash`, `outcome`,

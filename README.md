@@ -93,11 +93,14 @@ Expected route count: 21.
   every flow (`assert_chain_calls_allowlisted`), bad/oversized/unknown
   bodies, backend failures, the write trace (invalid bodies leave a marker
   and no record; a parsed refusal creates an unbound record that the first
-  valid write binds; refusals on a live or terminal record are appended to
-  a bounded `refusals[]` with the status kept; unrecorded-stage and
-  live-entry refusals; unknown-token and prod refusals; sell ownership via
-  planned decimals; launch refusals; a no-op re-POST refreshes
-  `last_write_ms`), and the secret boundary (no URL/key ever reaches a
+  valid write binds, even when the tuple was computable, so a corrected body
+  keeps its id; refusals on a live or terminal record are appended to a
+  bounded `refusals[]` with the status kept; a refusal on a bound record
+  with nothing staged replaces its stale error; unrecorded-stage and
+  live-entry refusals; unknown-token, prod and invalid-network refusals, and
+  the record's `network` rewritten to the resolved one on the first stage;
+  sell ownership via planned decimals; launch refusals; a no-op re-POST
+  refreshes `last_write_ms`), and the secret boundary (no URL/key ever reaches a
   record, a marker or a response; no route file references the secret
   namespace).
 
@@ -123,11 +126,13 @@ No test contacts a network or a Bloom daemon.
 - **D13** Every write leaves a readable trace (`trace.rs`). Bloom delivers
   mounted Petal writes asynchronously and never returns the route's answer
   to the writer, so a refused write persists its outcome: the operation
-  record is created/advanced to `failed` (or, when the record is live or
-  terminal, the refusal is appended to its bounded `refusals[]` and the
-  status kept), and a per-wallet `tolly/lastwrite/<wallet>` marker is
-  written on every write, parsed or not. The route response is unchanged;
-  the successful path stages exactly as before.
+  record is created unbound (a refusal never binds an `operationId`) or
+  advanced to `failed` (or, when the record is live or terminal, the
+  refusal is appended to its bounded `refusals[]` and the status kept), and
+  a per-wallet `tolly/lastwrite/<wallet>` marker is written on every write,
+  parsed or not. Agents read the marker first (`body_sha256`,
+  `record_effect`), then the record it names. The route response is
+  unchanged; the successful path stages exactly as before.
 - **D7** Wallet address via `vfs_read("wallets/{wallet}/address")`.
 - **D8** No logo pinning; the agent supplies a pinned `imageURI`.
 - **D9** `max_fee_per_gas` / `max_priority_fee_per_gas` left `None` (the
