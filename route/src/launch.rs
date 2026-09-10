@@ -18,6 +18,7 @@ use crate::host;
 use crate::ops::{self, Kind, Operation, Status, Step};
 use crate::policy::{self, MAX_BODY_BYTES, META_MAX_BYTES};
 use crate::swap::{acknowledge_unrecorded_stage, stage_step};
+use crate::trace::{self, WriteTrace};
 use crate::tx;
 use crate::wallet::{check_wallet_id, wallet_address};
 
@@ -122,6 +123,8 @@ pub fn launch_description(wallet: &str) -> DispatchResponse {
         "description": "Launch a token on TollyPad for this Bloom wallet: a fixed 1B supply minted into a permanently locked single-sided V3 pool (1% tier) quoted in USDC. One write stages at most one transaction (an exact USDC approve to the pad when dev_buy_usdc > 0 and the allowance is short, else createToken).",
         "writes_enabled": policy::writes_enabled(),
         "writes_setting": format!("{}={}", policy::WRITES_SETTING, policy::WRITES_ENABLED_VALUE),
+        "write_semantics": trace::WRITE_SEMANTICS,
+        "last_write": trace::last_write_json(wallet),
         "pad": addr_hex(PAD),
         "body": {
             "operationId": "required; [a-z0-9][a-z0-9._-]{0,63}; bound to (name, symbol, meta, dev_buy_usdc)",
@@ -140,27 +143,53 @@ pub fn launch_description(wallet: &str) -> DispatchResponse {
     }))
 }
 
-/// `wallets/[wallet]/launch.json` write.
+/// `wallets/[wallet]/launch.json` write. Every outcome is persisted by the
+/// trace (see `trace`): Bloom delivers mounted writes asynchronously.
 pub fn route_launch(wallet: &str, body: &[u8]) -> DispatchResponse {
     if let Err(r) = check_wallet_id(wallet) {
         return r;
     }
+    let mut trace = WriteTrace::new(Kind::Launch, wallet, body);
+    let response = launch_flow(wallet, body, &mut trace);
+    trace.finish(response)
+}
+
+fn launch_flow(wallet: &str, body: &[u8], trace: &mut WriteTrace) -> DispatchResponse {
     if body.len() > MAX_BODY_BYTES {
-        return petal::error(-3, format!("request body exceeds {MAX_BODY_BYTES} bytes"));
+        return petal::error(
+            -3,
+            format!("invalid-request: request body exceeds {MAX_BODY_BYTES} bytes"),
+        );
     }
     let request: LaunchRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
-        Err(e) => return petal::error(-3, format!("invalid request JSON: {e}")),
+        Err(e) => return petal::error(-3, format!("invalid-request: invalid request JSON: {e}")),
     };
     let echo = serde_json::to_value(&request).unwrap_or(Value::Null);
+    trace.parsed(&request.operation_id, echo.clone());
     let intent = match validate(&request) {
         Ok(i) => i,
-        Err(e) => return petal::error(-3, e),
+        Err(e) => return petal::error(-3, format!("invalid-request: {e}")),
     };
-    advance(wallet, intent, echo)
+    trace.tuple(digest_of(&intent));
+    advance(wallet, intent, echo, trace)
 }
 
+/// sha256(launch || JCS(name, symbol, meta, dev buy)): the launch tuple.
+fn digest_of(intent: &Intent) -> String {
+    let economic = json!({
+        "kind": "launch",
+        "name": intent.name,
+        "symbol": intent.symbol,
+        "meta": intent.meta,
+        "dev_buy_raw": intent.dev_buy_raw.to_string(),
+    });
+    ops::request_digest(Kind::Launch, &economic)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn refuse(
+    trace: &mut WriteTrace,
     op: &mut Operation,
     step: Step,
     code: i32,
@@ -170,17 +199,19 @@ fn refuse(
     now: u64,
 ) -> DispatchResponse {
     op.set_failed(Some(step), op_code, message.clone(), retryable, now);
+    op.last_write_ms = Some(now);
     if let Err(e) = ops::save(op) {
         return petal::error(
             -4,
-            format!("{message} (and the record could not be updated: {e})"),
+            format!("{op_code}: {message} (and the record could not be updated: {e})"),
         );
     }
+    trace.recorded();
     petal::error(code, format!("{op_code}: {message}"))
 }
 
-fn advance(wallet: &str, intent: Intent, echo: Value) -> DispatchResponse {
-    let now = host::now_ms();
+fn advance(wallet: &str, intent: Intent, echo: Value, trace: &mut WriteTrace) -> DispatchResponse {
+    let now = trace.now();
     if !policy::writes_enabled() {
         return petal::error(
             -2,
@@ -195,31 +226,27 @@ fn advance(wallet: &str, intent: Intent, echo: Value) -> DispatchResponse {
         Ok(n) => n,
         Err(r) => return r,
     };
+    trace.network(network);
     let address = match wallet_address(wallet) {
         Ok(a) => a,
         Err(e) => return petal::error(-4, e),
     };
-    let economic = json!({
-        "kind": "launch",
-        "name": intent.name,
-        "symbol": intent.symbol,
-        "meta": intent.meta,
-        "dev_buy_raw": intent.dev_buy_raw.to_string(),
-    });
-    let digest = ops::request_digest(Kind::Launch, &economic);
+    trace.address(address);
+    let digest = digest_of(&intent);
     let mut op = match ops::load(wallet, &intent.id) {
         Ok(Some(op)) => op,
         Ok(None) => {
-            let fresh = Operation::new(
+            let mut fresh = Operation::new(
                 &intent.id,
                 wallet,
                 address,
                 Kind::Launch,
-                network,
+                network.name(),
                 digest.clone(),
                 echo.clone(),
                 now,
             );
+            fresh.last_write_ms = Some(now);
             match ops::claim(&fresh) {
                 Ok(true) => fresh,
                 Ok(false) => match ops::load(wallet, &intent.id) {
@@ -234,18 +261,22 @@ fn advance(wallet: &str, intent: Intent, echo: Value) -> DispatchResponse {
         }
         Err(e) => return petal::error(-4, e),
     };
+    if op.is_unbound() {
+        op.request_sha256 = digest.clone();
+    }
     if op.request_sha256 != digest {
         return petal::error(
             -3,
-            "operationId already bound to a different launch (name, symbol, meta or dev buy differ); use a new operationId",
+            "operation-id-bound: operationId already bound to a different launch (name, symbol, meta or dev buy differ); use a new operationId",
         );
     }
     if op.kind != Kind::Launch {
         return petal::error(
             -3,
-            "operationId already bound to a different operation kind",
+            "operation-id-bound: operationId already bound to a different operation kind",
         );
     }
+    op.last_write_ms = Some(now);
     match ops::reconcile(&mut op, network, now) {
         Ok(changed) => {
             if changed && let Err(e) = ops::save(&op) {
@@ -267,7 +298,13 @@ fn advance(wallet: &str, intent: Intent, echo: Value) -> DispatchResponse {
     }
     match ops::live_conflict(wallet, Kind::Launch, &intent.symbol, &intent.id) {
         Ok(Some(conflict)) => {
-            return petal::error(-2, conflict.message(&format!("launch {}", intent.symbol)));
+            return petal::error(
+                -2,
+                format!(
+                    "live-entry-conflict: {}",
+                    conflict.message(&format!("launch {}", intent.symbol))
+                ),
+            );
         }
         Ok(None) => {}
         Err(e) => return petal::error(-4, e),
@@ -313,6 +350,7 @@ fn advance(wallet: &str, intent: Intent, echo: Value) -> DispatchResponse {
         usdc6_to_native18(intent.dev_buy_raw).saturating_add(policy::gas_reserve_wei());
     if native < native_needed {
         return refuse(
+            trace,
             &mut op,
             Step::Create,
             -3,
@@ -344,6 +382,7 @@ fn advance(wallet: &str, intent: Intent, echo: Value) -> DispatchResponse {
         };
         if erc20 < intent.dev_buy_raw {
             return refuse(
+                trace,
                 &mut op,
                 Step::Create,
                 -3,
@@ -365,6 +404,7 @@ fn advance(wallet: &str, intent: Intent, echo: Value) -> DispatchResponse {
             let data = abi::erc20_approve(PAD, intent.dev_buy_raw);
             if let Err(e) = tx::preflight(address, USDC, &data, "approve pre-flight") {
                 return refuse(
+                    trace,
                     &mut op,
                     Step::Approve,
                     -4,
@@ -375,6 +415,7 @@ fn advance(wallet: &str, intent: Intent, echo: Value) -> DispatchResponse {
                 );
             }
             return stage_step(
+                trace,
                 &mut op,
                 wallet,
                 Step::Approve,
@@ -398,6 +439,7 @@ fn advance(wallet: &str, intent: Intent, echo: Value) -> DispatchResponse {
     );
     if let Err(e) = tx::preflight(address, PAD, &data, "createToken pre-flight") {
         return refuse(
+            trace,
             &mut op,
             Step::Create,
             -4,
@@ -408,6 +450,7 @@ fn advance(wallet: &str, intent: Intent, echo: Value) -> DispatchResponse {
         );
     }
     stage_step(
+        trace,
         &mut op,
         wallet,
         Step::Create,

@@ -165,6 +165,23 @@ pub struct Plan {
     pub salt: Option<String>,
 }
 
+/// A write this operation refused while its record could not be rewritten
+/// (a live outbox entry, a mined step, a completed or terminal operation, an
+/// unrecorded stage): the refusal is appended here instead, bounded to the
+/// newest `MAX_REFUSALS`, and `status` is left alone. Bloom delivers mounted
+/// writes asynchronously, so this list is where such a refusal is visible.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Refusal {
+    pub ts_ms: u64,
+    /// The route response code the write would have returned (`-1`..`-4`).
+    pub response_code: i32,
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
+pub const MAX_REFUSALS: usize = 8;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Operation {
     pub schema: String,
@@ -195,6 +212,12 @@ pub struct Operation {
     /// (audit trail; these entries live only in Bloom's outbox).
     #[serde(default)]
     pub unrecorded_stages: Vec<StageMarker>,
+    /// Refusals recorded while the record was protected (see `Refusal`).
+    #[serde(default)]
+    pub refusals: Vec<Refusal>,
+    /// When a write last addressed this operation (accepted or refused).
+    #[serde(default)]
+    pub last_write_ms: Option<u64>,
 }
 
 impl Operation {
@@ -204,7 +227,7 @@ impl Operation {
         wallet: &str,
         wallet_address: Address,
         kind: Kind,
-        network: Network,
+        network: &str,
         request_sha256: String,
         request: Value,
         now_ms: u64,
@@ -215,7 +238,7 @@ impl Operation {
             wallet: wallet.into(),
             wallet_address: addr_hex(wallet_address),
             kind,
-            network: network.name().into(),
+            network: network.into(),
             chain: CHAIN.into(),
             request_sha256,
             status: Status::Created,
@@ -232,6 +255,35 @@ impl Operation {
             note: None,
             stage_in_flight: None,
             unrecorded_stages: Vec::new(),
+            refusals: Vec::new(),
+            last_write_ms: None,
+        }
+    }
+
+    /// A record created by a refused write carries no economic digest yet;
+    /// the first write that gets past validation binds it (the flows set
+    /// `request_sha256` on load).
+    pub fn is_unbound(&self) -> bool {
+        self.request_sha256.is_empty()
+    }
+
+    /// Whether a refusal may rewrite this record's `status`/`error`. Never
+    /// while an outbox entry may be live (`staged`, `broadcast`, `unknown`,
+    /// `stage_in_flight`), after a step mined (`confirmed`), or once the
+    /// operation is completed or terminally failed: the refusal is appended
+    /// to `refusals[]` instead and the status stays.
+    pub fn refusal_rewrites_status(&self) -> bool {
+        self.stage_in_flight.is_none()
+            && !self.is_terminal()
+            && matches!(self.status, Status::Created | Status::Failed)
+    }
+
+    /// Append a refusal, keeping only the newest `MAX_REFUSALS`.
+    pub fn push_refusal(&mut self, refusal: Refusal) {
+        self.refusals.push(refusal);
+        if self.refusals.len() > MAX_REFUSALS {
+            let excess = self.refusals.len() - MAX_REFUSALS;
+            self.refusals.drain(..excess);
         }
     }
 
@@ -936,7 +988,9 @@ pub fn recent_summary(wallet: &str, kind: Kind, max: usize) -> Value {
                         "status": op.status,
                         "step": op.step,
                         "next_action": op.next_action,
+                        "error_code": op.error.as_ref().map(|e| e.code.clone()),
                         "updated_ms": op.updated_ms,
+                        "last_write_ms": op.last_write_ms,
                         "file": format!("operations/{}.json", op.id),
                     })
                 })
@@ -970,7 +1024,7 @@ mod tests {
                 .parse()
                 .unwrap(),
             Kind::Buy,
-            Network::Stage,
+            Network::Stage.name(),
             "digest".into(),
             json!({}),
             1_000,

@@ -63,15 +63,32 @@ impl Network {
                 Ok(Self::Stage) => Ok(Self::Stage),
                 Ok(Self::Prod) => Err(petal::error(
                     -2,
-                    "prod API is not enabled in this build; it ships as a separate manifest release",
+                    "prod-disabled: prod API is not enabled in this build; it ships as a separate manifest release",
                 )),
-                Err(e) => Err(petal::error(-3, e)),
+                Err(e) => Err(petal::error(-3, format!("network-setting-invalid: {e}"))),
             },
             Err(e) => Err(petal::error(
                 -4,
                 format!("runtime setting: {}", sanitize_host_error(&e.message())),
             )),
         }
+    }
+}
+
+/// The network the owner asked for, as written in `tolly_network` (or
+/// `stage`), for records of writes refused before `current()` resolved it.
+pub fn requested_network_name() -> String {
+    match host::runtime_setting(NETWORK_SETTING) {
+        Ok(Some(value)) => {
+            let value = value.trim().to_ascii_lowercase();
+            let mut end = value.len().min(16);
+            while !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            value[..end].to_owned()
+        }
+        Ok(None) => Network::Stage.name().to_owned(),
+        Err(_) => "unavailable".to_owned(),
     }
 }
 

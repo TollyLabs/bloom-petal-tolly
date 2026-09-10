@@ -12,6 +12,8 @@
 //! - `quote`: best-execution quoting across a token's venues.
 //! - `ops`: the durable operation record and its state machine.
 //! - `tx`, `swap`, `launch`, `positions`, `wallet`: the write/step flows.
+//! - `trace`: every write leaves a readable trace (Bloom delivers mounted
+//!   writes asynchronously, so a refusal must be discoverable through reads).
 //! - `host`: the only seam to the Bloom host (fake host under `cfg(test)`).
 
 pub mod abi;
@@ -28,6 +30,7 @@ pub mod policy;
 pub mod positions;
 pub mod quote;
 pub mod swap;
+pub mod trace;
 pub mod tx;
 pub mod wallet;
 
