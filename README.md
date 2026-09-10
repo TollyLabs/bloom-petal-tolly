@@ -15,7 +15,7 @@ transaction spends real USDC once the owner confirms it.
 
 ```
 petal.toml               package manifest: caps ceiling, net.allow, store policy
-petal-build.toml         route build config; SDK pinned by full commit SHA
+petal-build.toml         route build config; SDK pinned by full commit SHA; no extra crate deps
 route/Cargo.toml         shared route crate (same SDK pin)
 route/src/
   constants.rs           GENERATED from the frontend sources (scripts/gen-constants.mjs)
@@ -81,9 +81,14 @@ Expected route count: 21.
   markets, token detail, buy/sell quotes (V4 best but unsupported, QuoterV2
   revert, sell normalisation), the buy walk (writes disabled → -2, cap → -3,
   approve-then-swap with gross `swapWithToll` and a fresh floor, bound-id
-  mismatch → -3, venue pin rules, stage denial, persist failure after stage,
-  pending dedupe, completion by balance delta), sell "all", launch with a
-  frozen salt and index completion, positions bounds, bad/oversized/unknown
+  mismatch → -3, venue pin rules, stage denial and error classification,
+  persist failure after stage → `stage_in_flight` → refuse → acknowledge,
+  claim race, pending dedupe, completion by balance delta, zero-delta buys
+  stay `confirmed`, a forgotten outbox entry never regresses a receipt),
+  sell "all", sell completion net of gas, launch with a frozen salt and index
+  completion, launch completion under an API outage, V4 pool-key and
+  quote-representation tickets, positions bounds, the B1 chain allowlist on
+  every flow (`assert_chain_calls_allowlisted`), bad/oversized/unknown
   bodies, backend failures, and the secret boundary (no URL/key ever reaches a
   record or response; no route file references the secret namespace).
 
@@ -131,7 +136,27 @@ No test contacts a network or a Bloom daemon.
   to/value/data, unexpired) are de-duplicated by the host.
 - `tx_inspect.state` is the receipt `outcome` (`success`|`reverted`) when a
   receipt exists, else `pending|sent|success|reverted|failed|cancelled`;
-  `Denied`/`NotFound` map to a non-regressing `unknown`.
+  `Denied`/`NotFound` map to a non-regressing `unknown` — and once a
+  `success` outcome is recorded the entry is never inspected again.
+- `tx_stage` errors reach the guest as `backend: stage EVM outbox: <engine
+  error>`; the SDK's `host_err` turns any message containing "denied" into
+  `HostStatus::Denied` (→ `policy-denied`), `valuation unavailable: …` is
+  matched by wording (→ `valuation-unavailable`), everything else is a
+  retryable `stage-failed`. The host does not de-duplicate a re-quoted swap
+  (different calldata), hence the `stage_in_flight` marker.
+- `store_put_new` on an existing key is reported as a message containing
+  "already exists" (not a status); `ops::claim` treats it as "exists".
+- Store keys: `tolly/ops/<wallet>/<id>` (records) and
+  `tolly/live/<wallet>/<kind>/<subject>` (the live-entry index that the M1
+  check reads instead of scanning records). Both live in the `state`
+  namespace; nothing secret is stored.
+- Runtime settings read through `bloom:env`: `tolly_writes` (the write
+  gate) and `tolly_network` (`stage` default; `prod` refused until D10).
+- Route cache TTLs are the SDK's: quotes `http_read_spec(2_000)` (2 s, a
+  pure read — not the audited side-effecting chain spec, which only
+  `operations/[id].json` uses because that read rewrites the store),
+  `positions.json` `account_read_spec()` (5 s), `operations/` listing and
+  `wallets/` the 30 s store default.
 - Wallet ids may contain `/` per the SDK grammar; this Petal additionally
   requires a single safe segment ≤ 64 bytes (store keys).
 - The `[wallet]` param is the Bloom wallet id; `[usdc]`/`[amount]`/`[id]`
@@ -151,6 +176,13 @@ No test contacts a network or a Bloom daemon.
   `fee::tests` pins both facts.
 - `operations/[id].json` also declares `bloom:http` (launch completion reads
   the creator index, D11).
+- Sell completion is reported as `balance_delta_net_of_gas`: on Arc the
+  ERC-20 USDC view is the gas balance, and the receipt exposes no `gas_used`.
+- A V4 venue whose quote representation (native 18 / ERC-20 6) differs from
+  the API's `quoteDecimals` is ticketed `quote-decimals-mismatch` (the site's
+  `venueMatchesQuoteDecimals`), and one whose `currency0/1` are not the sorted
+  `(token, quote)` pair is ticketed `v4-pool-key-mismatch`; neither can be
+  `best`.
 - Calldata golden vectors are produced with Python `eth_abi` + Foundry `cast`
   rather than the repo's viem (no `node_modules` in the worktree); the inputs
   are the frontend's.
