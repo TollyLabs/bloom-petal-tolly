@@ -46,7 +46,7 @@ cargo test --manifest-path route/Cargo.toml --locked
 petal build --root .            # or scripts/build.sh (installs the pinned CLI)
 petal check --root .
 wasm-tools component wit petal/tolly/<route>.wasm | grep import
-petal package --root . --out dist/tolly-v0.1.2.petal.tar.gz
+petal package --root . --out dist/tolly-v0.1.3.petal.tar.gz
 bloom petals build . && bloom petals install .    # needs a Bloom daemon
 ```
 
