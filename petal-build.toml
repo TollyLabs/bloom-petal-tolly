@@ -11,7 +11,7 @@ alias = "example_route"
 [sdk]
 package = "bloom-petal-sdk"
 git = "https://github.com/bloom-directory/petal"
-rev = "73c5b06a7759"
+rev = "73c5b06a77599368fbc79fb7947a629b5b4c630e"
 
 [dependencies]
 serde_json = "1"
