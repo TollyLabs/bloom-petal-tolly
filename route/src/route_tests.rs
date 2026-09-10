@@ -136,6 +136,7 @@ fn seeded_staged(kind: Kind, id: &str, outbox_id: &str, updated_ms: u64) -> ops:
         to: addr_hex(MULTI_ROUTER),
         outbox_id: outbox_id.into(),
         confirm_path: crate::tx::confirm_path(WALLET, outbox_id),
+        confirm_path_note: crate::tx::mount_note(),
         staged_ms: updated_ms,
         outbox_state: "pending".into(),
         tx_hash: None,
@@ -152,7 +153,7 @@ fn seeded_staged(kind: Kind, id: &str, outbox_id: &str, updated_ms: u64) -> ops:
     op.status = Status::Staged;
     op.step = Some(Step::Swap);
     op.finalize_next_action();
-    op.confirm_path = Some(crate::tx::confirm_path(WALLET, outbox_id));
+    op.set_confirm_path(crate::tx::confirm_path(WALLET, outbox_id));
     op
 }
 
@@ -1134,7 +1135,7 @@ fn buy_walk_approve_then_swap_with_gross_and_fresh_floor() {
     assert_eq!(rec["next_action"], "confirm_in_bloom");
     assert_eq!(
         rec["confirm_path"],
-        "/bloom/wallets/main/chains/arc/outbox/pending/ob-1/confirm"
+        "wallets/main/chains/arc/outbox/pending/ob-1/confirm"
     );
     assert_eq!(rec["wallet_address"], addr_hex(wallet_address()));
     assert_eq!(
@@ -1728,8 +1729,52 @@ fn reverted_swap_is_retried_with_a_superseded_attempt() {
     assert_eq!(rec["status"], "staged");
     assert_eq!(
         rec["confirm_path"],
-        "/bloom/wallets/main/chains/arc/outbox/pending/ob-2/confirm"
+        "wallets/main/chains/arc/outbox/pending/ob-2/confirm"
     );
+    assert_eq!(rec["confirm_path_note"], crate::tx::MOUNT_NOTE);
+    assert_eq!(rec["cancel_hint"], crate::tx::CANCEL_HINT);
+}
+
+#[test]
+fn staged_records_point_at_mount_relative_confirm_paths_with_notes() {
+    fake_host::install(host_for_barc_buy());
+    let body = buy_body("buy-m", "25", json!({"allow_worse_venue": true}));
+    assert_eq!(route_buy(WALLET, &body), DispatchResponse::Write);
+    let rec = record("buy-m");
+    assert_eq!(rec["status"], "staged");
+    assert_eq!(rec["next_action"], "confirm_in_bloom");
+    // Host fact: the mount point is the owner's (`~/bloom` by default), never
+    // `/bloom`, so every emitted path is relative to it and says so.
+    assert_eq!(
+        rec["confirm_path"],
+        "wallets/main/chains/arc/outbox/pending/ob-1/confirm"
+    );
+    assert_eq!(rec["confirm_path_note"], crate::tx::MOUNT_NOTE);
+    assert!(
+        rec["confirm_path_note"]
+            .as_str()
+            .unwrap()
+            .contains("`~/bloom`")
+    );
+    assert_eq!(rec["cancel_hint"], crate::tx::CANCEL_HINT);
+    assert_eq!(rec["txs"][0]["confirm_path"], rec["confirm_path"]);
+    assert_eq!(rec["txs"][0]["confirm_path_note"], crate::tx::MOUNT_NOTE);
+    let text = rec.to_string();
+    assert!(
+        !text.contains("/bloom/"),
+        "no absolute mount path anywhere in the record: {text}"
+    );
+    // Once the entry leaves `pending` the path and its notes leave together.
+    fake_host::with(|h| {
+        h.set_outbox("ob-1", "sent", Some("0x1"), None);
+        h.now_ms = NOW + 10;
+    });
+    let doc = reconciled_record(Kind::Buy, "buy-m");
+    assert_eq!(doc["status"], "broadcast");
+    assert_eq!(doc["confirm_path"], Value::Null);
+    assert_eq!(doc["confirm_path_note"], Value::Null);
+    assert_eq!(doc["cancel_hint"], Value::Null);
+    assert_eq!(doc["txs"][0]["confirm_path_note"], crate::tx::MOUNT_NOTE);
 }
 
 #[test]
@@ -1812,6 +1857,7 @@ fn sell_completion_is_labelled_net_of_gas_and_completes_at_zero_delta() {
         to: addr_hex(MULTI_ROUTER),
         outbox_id: "ob-9".into(),
         confirm_path: crate::tx::confirm_path(WALLET, "ob-9"),
+        confirm_path_note: crate::tx::mount_note(),
         staged_ms: NOW,
         outbox_state: "pending".into(),
         tx_hash: None,

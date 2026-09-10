@@ -9,7 +9,9 @@
 //!
 //! `tx_confirm` is deliberately never called (D12): under a wallet policy of
 //! `agent_autonomy = under_policy` it would broadcast without a prompt. The
-//! owner confirms at `/bloom/wallets/<wallet>/chains/arc/outbox/pending/<outbox_id>/confirm`.
+//! owner confirms by writing to `confirm_path`
+//! (`wallets/<wallet>/chains/arc/outbox/pending/<outbox_id>/confirm`, relative
+//! to the Bloom mount root, see `MOUNT_NOTE`).
 
 use alloy_primitives::Address;
 use petal::{EvmTransaction, HostStatus, SdkError, StagedTransaction};
@@ -79,9 +81,30 @@ pub fn stage(wallet: &str, to: Address, data: &[u8]) -> Result<StagedTransaction
     }
 }
 
-/// The confirm path the owner uses for a staged entry.
+/// The confirm file of a staged entry, RELATIVE to the Bloom mount root:
+/// `wallets/<wallet>/chains/arc/outbox/pending/<outbox_id>/confirm`.
+///
+/// The mount point is wherever the owner's fstab puts it (`~/bloom` on a
+/// default Linux install); it is not `/bloom`: `mount_path = "/bloom"` in
+/// `~/.bloom/config.toml` is informational only (bloom-proto `config.rs`),
+/// and a literal `/bloom/...` gets ENOENT. Agents prefix the root themselves;
+/// `MOUNT_NOTE` travels with every emitted path (`confirm_path_note`).
 pub fn confirm_path(wallet: &str, outbox_id: &str) -> String {
-    format!("/bloom/wallets/{wallet}/chains/{CHAIN}/outbox/pending/{outbox_id}/confirm")
+    format!("wallets/{wallet}/chains/{CHAIN}/outbox/pending/{outbox_id}/confirm")
+}
+
+/// Emitted next to every `confirm_path` as `confirm_path_note`.
+pub const MOUNT_NOTE: &str = "paths are relative to the Bloom mount root (the owner's mount point, `~/bloom` on a default Linux install; `mount_path` in config.toml is not the mount point)";
+
+/// Emitted as `cancel_hint` while an entry is pending: the mount refuses the
+/// separate `cancel` file (EPERM) and the word `cancel` written into the
+/// confirm file cancels (Bloom v0.2.1, see README "Host facts").
+pub const CANCEL_HINT: &str = "to cancel, write the word `cancel` into the same confirm file (the separate cancel file is refused on the mount)";
+
+/// serde default for `TxEntry::confirm_path_note` (records written before
+/// the note existed).
+pub fn mount_note() -> String {
+    MOUNT_NOTE.to_owned()
 }
 
 /// `plan_md` is the engine's rendered plan (no key material); keep a bounded
@@ -102,11 +125,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn confirm_path_names_the_outbox_entry() {
-        assert_eq!(
-            confirm_path("main", "ob-7"),
-            "/bloom/wallets/main/chains/arc/outbox/pending/ob-7/confirm"
+    fn confirm_path_names_the_outbox_entry_relative_to_the_mount_root() {
+        let path = confirm_path("main", "ob-7");
+        assert_eq!(path, "wallets/main/chains/arc/outbox/pending/ob-7/confirm");
+        assert!(
+            !path.starts_with('/'),
+            "never absolute: the mount point is the owner's"
         );
+        assert!(
+            !path.contains("bloom"),
+            "`/bloom` is config.toml's mount_path, not the mount"
+        );
+        assert_eq!(mount_note(), MOUNT_NOTE);
+        assert!(MOUNT_NOTE.contains("relative to the Bloom mount root"));
+        assert!(MOUNT_NOTE.contains("`~/bloom`"));
+        assert!(CANCEL_HINT.contains("write the word `cancel`"));
     }
 
     #[test]

@@ -33,6 +33,7 @@ use crate::constants::{CHAIN, USDC, USDC_ERC20_DECIMALS};
 use crate::host;
 use crate::policy::{OPS_SCAN_MAX_OPS, RECONCILE_MAX_OPS};
 use crate::sanitize_host_error;
+use crate::tx;
 use crate::wallet::check_wallet_id;
 
 pub const SCHEMA: &str = "tolly.operation.v1";
@@ -85,7 +86,9 @@ pub enum Step {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NextAction {
-    /// The owner confirms the pending outbox entry at `confirm_path`.
+    /// The owner confirms the pending outbox entry by writing to
+    /// `confirm_path`, which is RELATIVE to the Bloom mount root
+    /// (`confirm_path_note` says so; `cancel_hint` says how to cancel instead).
     ConfirmInBloom,
     /// Broadcast or awaiting completion evidence: poll this file.
     Wait,
@@ -111,7 +114,12 @@ pub struct TxEntry {
     pub role: Step,
     pub to: String,
     pub outbox_id: String,
+    /// `wallets/<wallet>/chains/arc/outbox/pending/<outbox_id>/confirm`,
+    /// relative to the Bloom mount root (`tx::confirm_path`).
     pub confirm_path: String,
+    /// Where `confirm_path` is rooted (`tx::MOUNT_NOTE`).
+    #[serde(default = "crate::tx::mount_note")]
+    pub confirm_path_note: String,
     pub staged_ms: u64,
     /// Host state as last inspected: pending|sent|success|reverted|failed|cancelled|unknown.
     pub outbox_state: String,
@@ -200,7 +208,16 @@ pub struct Operation {
     pub status: Status,
     pub step: Option<Step>,
     pub next_action: NextAction,
+    /// While `staged`: the pending entry's confirm file, relative to the
+    /// Bloom mount root (see `confirm_path_note`).
     pub confirm_path: Option<String>,
+    /// Set with `confirm_path`: where it is rooted (`tx::MOUNT_NOTE`).
+    #[serde(default)]
+    pub confirm_path_note: Option<String>,
+    /// Set with `confirm_path`: how the owner cancels instead
+    /// (`tx::CANCEL_HINT`).
+    #[serde(default)]
+    pub cancel_hint: Option<String>,
     pub created_ms: u64,
     pub updated_ms: u64,
     pub request: Value,
@@ -249,6 +266,8 @@ impl Operation {
             step: None,
             next_action: NextAction::Repost,
             confirm_path: None,
+            confirm_path_note: None,
+            cancel_hint: None,
             created_ms: now_ms,
             updated_ms: now_ms,
             request,
@@ -354,9 +373,24 @@ impl Operation {
             message: message.into(),
             retryable,
         });
-        self.confirm_path = None;
+        self.clear_confirm_path();
         self.updated_ms = now_ms;
         self.finalize_next_action();
+    }
+
+    /// Point the record at a pending entry's confirm file together with the
+    /// notes an agent needs to use it: the path is relative to the Bloom
+    /// mount root, and the word `cancel` written there cancels.
+    pub fn set_confirm_path(&mut self, confirm_path: String) {
+        self.confirm_path = Some(confirm_path);
+        self.confirm_path_note = Some(tx::MOUNT_NOTE.into());
+        self.cancel_hint = Some(tx::CANCEL_HINT.into());
+    }
+
+    fn clear_confirm_path(&mut self) {
+        self.confirm_path = None;
+        self.confirm_path_note = None;
+        self.cancel_hint = None;
     }
 
     pub fn finalize_next_action(&mut self) {
@@ -379,8 +413,14 @@ impl Operation {
             }
             Status::Unknown => NextAction::Inspect,
         };
-        if self.status != Status::Staged {
-            self.confirm_path = None;
+        if self.status == Status::Staged {
+            if let Some(path) = self.confirm_path.clone() {
+                // Re-emit the notes with the path (a record from before
+                // they existed).
+                self.set_confirm_path(path);
+            }
+        } else {
+            self.clear_confirm_path();
         }
     }
 }
@@ -684,7 +724,7 @@ pub fn apply(op: &mut Operation, index: usize, inspected: &Inspected, now_ms: u6
             TxState::Pending => {
                 op.status = Status::Staged;
                 op.error = None;
-                op.confirm_path = Some(confirm);
+                op.set_confirm_path(confirm);
             }
             TxState::Broadcast => {
                 op.status = Status::Broadcast;
@@ -1148,6 +1188,7 @@ mod tests {
             to: "0x00".into(),
             outbox_id: "ob-1".into(),
             confirm_path: confirm_path("main", "ob-1"),
+            confirm_path_note: crate::tx::mount_note(),
             staged_ms: 1_000,
             outbox_state: "pending".into(),
             tx_hash: None,
@@ -1164,7 +1205,7 @@ mod tests {
         op.status = Status::Staged;
         op.step = Some(role);
         op.finalize_next_action();
-        op.confirm_path = Some(confirm_path("main", "ob-1"));
+        op.set_confirm_path(confirm_path("main", "ob-1"));
         op
     }
 
@@ -1291,6 +1332,8 @@ mod tests {
         assert_eq!(op.status, Status::Broadcast);
         assert_eq!(op.next_action, NextAction::Wait);
         assert_eq!(op.confirm_path, None);
+        assert_eq!(op.confirm_path_note, None, "the notes leave with the path");
+        assert_eq!(op.cancel_hint, None);
         apply(
             &mut op,
             0,

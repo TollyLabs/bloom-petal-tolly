@@ -983,7 +983,7 @@ pub(crate) fn acknowledge_unrecorded_stage(
         return Err(petal::error(
             -2,
             format!(
-                "unrecorded-stage: a {} transaction to {} was staged at {} ms but its record could not be written; inspect the wallet's outbox under /bloom/wallets/{}/chains/arc/outbox/ (confirm or cancel that entry), then re-POST with acknowledge_unrecorded_stage:true",
+                "unrecorded-stage: a {} transaction to {} was staged at {} ms but its record could not be written; inspect the wallet's outbox under wallets/{}/chains/arc/outbox/ at the Bloom mount root (confirm or cancel that entry), then re-POST with acknowledge_unrecorded_stage:true",
                 serde_json::to_value(marker.step)
                     .ok()
                     .and_then(|v| v.as_str().map(str::to_owned))
@@ -1086,6 +1086,7 @@ pub(crate) fn stage_step(
         to: addr_hex(to),
         outbox_id: staged.outbox_id.clone(),
         confirm_path: tx::confirm_path(wallet, &staged.outbox_id),
+        confirm_path_note: tx::mount_note(),
         staged_ms: now,
         outbox_state: "pending".into(),
         tx_hash: None,
@@ -1101,7 +1102,7 @@ pub(crate) fn stage_step(
     });
     op.status = Status::Staged;
     op.step = Some(step);
-    op.confirm_path = Some(tx::confirm_path(wallet, &staged.outbox_id));
+    op.set_confirm_path(tx::confirm_path(wallet, &staged.outbox_id));
     op.next_action = NextAction::ConfirmInBloom;
     op.error = None;
     op.note = None;

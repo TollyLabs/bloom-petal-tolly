@@ -1,7 +1,8 @@
 //! Bloom wallet ids and the wallet's EVM address.
 //!
-//! `[wallet]` is a Bloom wallet id under `/bloom/wallets/<id>`, never a `0x`
-//! address. `petal::wallet_param` validates the id; this module additionally
+//! `[wallet]` is a Bloom wallet id under `wallets/<id>` at the Bloom mount
+//! root (the owner's mount point, `~/bloom` by default, never `/bloom`), not a
+//! `0x` address. `petal::wallet_param` validates the id; this module additionally
 //! requires a single safe store segment (critique M5: the SDK grammar allows
 //! `/`, which would corrupt `tolly/ops/{wallet}/{id}` keys and listings).
 
@@ -16,7 +17,7 @@ pub fn check_wallet_id(wallet: &str) -> Result<(), DispatchResponse> {
     if petal::validate_wallet_id(wallet).is_err() {
         return Err(petal::error(
             -3,
-            "wallet must be a Bloom wallet id (see /bloom/wallets)",
+            "wallet must be a Bloom wallet id (a directory under wallets/ at the Bloom mount root)",
         ));
     }
     if !petal::is_safe_segment(wallet) || wallet.contains('/') || wallet.len() > 64 {
@@ -29,7 +30,7 @@ pub fn check_wallet_id(wallet: &str) -> Result<(), DispatchResponse> {
 }
 
 /// The wallet's checksummed owner/signer address, read from the host VFS
-/// (`wallets/<wallet>/address`, relative to the mounted `/bloom`).
+/// (`wallets/<wallet>/address`, relative to the Bloom mount root).
 pub fn wallet_address(wallet: &str) -> Result<Address, String> {
     let bytes = host::vfs_read(&format!("wallets/{wallet}/address"), 128)
         .map_err(|e| format!("wallet address: {}", sanitize_host_error(&e.message())))?;
