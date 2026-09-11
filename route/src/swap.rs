@@ -356,10 +356,7 @@ fn advance(wallet: &str, intent: Intent, echo: Value, trace: &mut WriteTrace) ->
             ),
         );
     }
-    let network = match Network::current() {
-        Ok(n) => n,
-        Err(r) => return r,
-    };
+    let network = Network::current();
     trace.network(network);
     let kind = match intent.side {
         Side::Buy => Kind::Buy,
@@ -453,8 +450,7 @@ fn advance(wallet: &str, intent: Intent, echo: Value, trace: &mut WriteTrace) ->
             "operation-id-bound: operationId already bound to a different operation kind",
         );
     }
-    // A record created by a refusal carries the network the owner asked for
-    // at the time; every write past the gates records the resolved one.
+    // Every write past the gates records the network it ran on.
     op.network = network.name().into();
     op.last_write_ms = Some(now);
 

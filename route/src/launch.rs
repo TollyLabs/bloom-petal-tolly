@@ -226,10 +226,7 @@ fn advance(wallet: &str, intent: Intent, echo: Value, trace: &mut WriteTrace) ->
             ),
         );
     }
-    let network = match Network::current() {
-        Ok(n) => n,
-        Err(r) => return r,
-    };
+    let network = Network::current();
     trace.network(network);
     let address = match wallet_address(wallet) {
         Ok(a) => a,
@@ -280,7 +277,7 @@ fn advance(wallet: &str, intent: Intent, echo: Value, trace: &mut WriteTrace) ->
             "operation-id-bound: operationId already bound to a different operation kind",
         );
     }
-    // See `swap::advance`: the resolved network replaces the requested one.
+    // See `swap::advance`: every write past the gates records the network.
     op.network = network.name().into();
     op.last_write_ms = Some(now);
     match ops::reconcile(&mut op, network, now) {

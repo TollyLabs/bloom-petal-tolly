@@ -86,6 +86,14 @@ impl FakeHost {
         self
     }
 
+    /// Drop every scripted reply for `url`: the next fetch of it fails like
+    /// an unreachable host.
+    pub fn forget_http(&mut self, url: &str) -> &mut Self {
+        self.http_replies.remove(url);
+        self.http_served.remove(url);
+        self
+    }
+
     pub fn reply_http_bytes(&mut self, url: &str, status: u16, body: &[u8]) -> &mut Self {
         self.http_replies
             .entry(url.to_owned())

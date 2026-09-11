@@ -1076,10 +1076,7 @@ pub fn route_read_side(wallet: &str, kind: Kind, recent_max: usize) -> RouteRead
             };
         }
     };
-    let network = Network::current().map_err(|response| match response {
-        DispatchResponse::Error { message, .. } => message,
-        DispatchResponse::Write | DispatchResponse::Read(_) => "network unavailable".into(),
-    });
+    let network = Network::current();
     let now = host::now_ms();
     let candidates: Vec<usize> = recent
         .ops
@@ -1095,22 +1092,19 @@ pub fn route_read_side(wallet: &str, kind: Kind, recent_max: usize) -> RouteRead
         let before = op.clone();
         // A change counts only once it is persisted: on any failure the
         // in-memory record goes back to what the store holds.
-        let (changed, error) = match &network {
-            Ok(network) => match reconcile(op, *network, now) {
-                Ok(true) => match save(op) {
-                    Ok(()) => (true, None),
-                    Err(e) => {
-                        *op = before;
-                        (false, Some(e))
-                    }
-                },
-                Ok(false) => (false, None),
+        let (changed, error) = match reconcile(op, network, now) {
+            Ok(true) => match save(op) {
+                Ok(()) => (true, None),
                 Err(e) => {
                     *op = before;
                     (false, Some(e))
                 }
             },
-            Err(e) => (false, Some(format!("not reconciled: {e}"))),
+            Ok(false) => (false, None),
+            Err(e) => {
+                *op = before;
+                (false, Some(e))
+            }
         };
         reconciled.push(json!({
             "id": op.id,
@@ -1178,7 +1172,7 @@ mod tests {
                 .parse()
                 .unwrap(),
             Kind::Buy,
-            Network::Stage.name(),
+            Network::Prod.name(),
             "digest".into(),
             json!({}),
             1_000,

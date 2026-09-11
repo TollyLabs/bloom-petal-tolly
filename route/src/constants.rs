@@ -12,8 +12,7 @@ pub const CHAIN: &str = "arc";
 pub const CHAIN_ID: u64 = 5042;
 pub const EXPLORER: &str = "https://arc-scan.org";
 
-/// TOLLY public API bases. Stage carries an `/api` prefix, prod does not.
-pub const API_STAGE: &str = "https://stage.tollylabs.com/api";
+/// TOLLY public API base (no `/api` prefix).
 pub const API_PROD: &str = "https://api.tollylabs.com";
 
 /// USDC ERC-20 view (6 decimals). The same balance is the 18-decimal native gas asset.

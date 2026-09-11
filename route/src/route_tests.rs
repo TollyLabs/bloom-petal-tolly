@@ -22,16 +22,13 @@ use crate::trace;
 
 const WALLET: &str = "main";
 const NOW: u64 = 1_789_070_000_000;
-/// Production is the default network: no `/api` prefix.
+/// The production API: no `/api` prefix.
 const HEALTH_URL: &str = "https://api.tollylabs.com/health";
 const MARKETS_URL: &str =
     "https://api.tollylabs.com/tokens?scope=ours&sort=volume&dir=desc&limit=50";
 const BARC_URL: &str = "https://api.tollylabs.com/token/0x4753c45fb550fecaa143a47968659117e6ffc2ce";
 const CALENDAR_URL: &str =
     "https://api.tollylabs.com/token/0x2005cd22ea3c1acfaa9e01d3a178f356bb03c81c";
-/// The team's stage site, reached only under `tolly_network = "stage"`.
-const STAGE_BARC_URL: &str =
-    "https://stage.tollylabs.com/api/token/0x4753c45fb550fecaa143a47968659117e6ffc2ce";
 
 fn wallet_address() -> Address {
     "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -49,18 +46,18 @@ fn calendar() -> Address {
         .unwrap()
 }
 fn barc_detail() -> Value {
-    serde_json::from_str(include_str!("../tests/fixtures/stage-token-barc.json")).unwrap()
+    serde_json::from_str(include_str!("../tests/fixtures/prod-token-barc.json")).unwrap()
 }
 fn calendar_detail() -> Value {
     let list: Value =
-        serde_json::from_str(include_str!("../tests/fixtures/stage-tokens-ours.json")).unwrap();
+        serde_json::from_str(include_str!("../tests/fixtures/prod-tokens-ours-page.json")).unwrap();
     json!({ "token": list["tokens"][0].clone(), "buys24h": 9, "sells24h": 3, "quoteDecimals": 6, "collisions": [], "rank": 1 })
 }
 fn health() -> Value {
-    serde_json::from_str(include_str!("../tests/fixtures/stage-health.json")).unwrap()
+    serde_json::from_str(include_str!("../tests/fixtures/prod-health.json")).unwrap()
 }
 fn markets() -> Value {
-    serde_json::from_str(include_str!("../tests/fixtures/stage-tokens-ours.json")).unwrap()
+    serde_json::from_str(include_str!("../tests/fixtures/prod-tokens-ours-page.json")).unwrap()
 }
 fn u(v: u128) -> U256 {
     U256::from(v)
@@ -285,45 +282,34 @@ fn api_failures_map_to_backend_and_not_found() {
 }
 
 #[test]
-fn prod_is_the_default_and_stage_is_an_explicit_setting() {
+fn prod_is_the_only_network_and_needs_no_setting() {
     fake_host::install(FakeHost::new(NOW));
-    assert_eq!(Network::current().unwrap(), Network::Prod);
-    assert_eq!(crate::api::requested_network_name(), "prod");
+    assert_eq!(Network::current(), Network::Prod);
+    assert_eq!(Network::current().name(), "prod");
+    assert_eq!(Network::current().api_base(), "https://api.tollylabs.com");
+    // No runtime setting selects a network: a stray value is never read.
     let mut host = FakeHost::new(NOW);
-    host.set_setting(crate::api::NETWORK_SETTING, "prod");
+    host.set_setting("tolly_network", "mainnet");
     fake_host::install(host);
-    assert_eq!(Network::current().unwrap(), Network::Prod);
-    let mut host = FakeHost::new(NOW);
-    host.set_setting(crate::api::NETWORK_SETTING, " stage ");
-    fake_host::install(host);
-    assert_eq!(Network::current().unwrap(), Network::Stage);
-    assert_eq!(crate::api::requested_network_name(), "stage");
-    let mut host = FakeHost::new(NOW);
-    host.set_setting(crate::api::NETWORK_SETTING, "mainnet");
-    fake_host::install(host);
-    assert_eq!(code(&Network::current().unwrap_err()), -3);
-    assert_eq!(crate::api::requested_network_name(), "invalid");
+    assert_eq!(Network::current(), Network::Prod);
 }
 
 #[test]
-fn stage_setting_routes_every_read_to_the_stage_host() {
-    let mut host = host_for_barc_buy();
-    host.set_setting(crate::api::NETWORK_SETTING, "stage");
-    host.reply_http(STAGE_BARC_URL, 200, &barc_detail());
-    fake_host::install(host);
+fn every_read_of_a_write_flow_goes_to_the_production_host() {
+    fake_host::install(host_for_barc_buy());
     let r = route_buy(
         WALLET,
-        &buy_body("buy-stage", "25", json!({"allow_worse_venue": true})),
+        &buy_body("buy-prod", "25", json!({"allow_worse_venue": true})),
     );
     assert_eq!(r, DispatchResponse::Write, "{}", message(&r));
-    let rec = record("buy-stage");
+    let rec = record("buy-prod");
     assert_eq!(rec["status"], "staged");
-    assert_eq!(rec["network"], "stage");
+    assert_eq!(rec["network"], "prod");
     fake_host::with(|h| {
         assert!(!h.http_calls.is_empty());
         for call in &h.http_calls {
             assert!(
-                call.url.starts_with("https://stage.tollylabs.com/api/"),
+                call.url.starts_with("https://api.tollylabs.com/"),
                 "{}",
                 call.url
             );
@@ -795,10 +781,10 @@ fn unknown_token_and_network_refusals_are_recorded() {
     assert_eq!(rec["error"]["retryable"], true);
     assert_eq!(last_write()["response_code"], -1);
 
-    // The owner points the Petal at the stage site, where nothing answers:
-    // a backend refusal recorded under the network the owner asked for.
+    // The production host does not answer: a backend refusal recorded
+    // under the only network, unbound.
     let mut host = host_for_barc_buy();
-    host.set_setting(crate::api::NETWORK_SETTING, "stage");
+    host.forget_http(BARC_URL);
     fake_host::install(host);
     assert_eq!(
         code(&route_buy(WALLET, &buy_body("buy-net-sw", "25", json!({})))),
@@ -806,12 +792,11 @@ fn unknown_token_and_network_refusals_are_recorded() {
     );
     let rec = record("buy-net-sw");
     assert_eq!(rec["error"]["code"], "backend");
-    assert_eq!(rec["network"], "stage", "the network the owner asked for");
+    assert_eq!(rec["network"], "prod");
     assert_eq!(rec["request_sha256"], "");
-    // The setting goes back to prod: the same id binds, stages, and the
-    // record's network is the one the stage actually ran on.
+    // The host answers again: the same id binds and stages.
     fake_host::with(|h| {
-        h.set_setting(crate::api::NETWORK_SETTING, "prod");
+        h.reply_http(BARC_URL, 200, &barc_detail());
         h.now_ms = NOW + 1;
     });
     let r = route_buy(
@@ -821,22 +806,8 @@ fn unknown_token_and_network_refusals_are_recorded() {
     assert_eq!(r, DispatchResponse::Write, "{}", message(&r));
     let rec = record("buy-net-sw");
     assert_eq!(rec["status"], "staged");
-    assert_eq!(rec["network"], "prod", "the network the stage ran on");
+    assert_eq!(rec["network"], "prod");
     assert_eq!(rec["request_sha256"].as_str().unwrap().len(), 64);
-
-    // A setting that names no network is recorded as `invalid`, never as
-    // the owner's raw text.
-    let mut host = host_for_barc_buy();
-    host.set_setting(crate::api::NETWORK_SETTING, "mainnet");
-    fake_host::install(host);
-    assert_eq!(
-        code(&route_buy(WALLET, &buy_body("buy-net", "25", json!({})))),
-        -3
-    );
-    let rec = record("buy-net");
-    assert_eq!(rec["error"]["code"], "network-setting-invalid");
-    assert_eq!(rec["error"]["retryable"], true);
-    assert_eq!(rec["network"], "invalid");
 }
 
 #[test]
@@ -2247,31 +2218,6 @@ fn reconciliation_is_bounded_to_the_newest_in_flight_operations() {
     assert_eq!(doc["recent"]["operations"][0]["id"], "buy-done");
     assert_eq!(doc["recent"]["scanned"], 11);
     assert_eq!(doc["recent"]["scan_truncated"], false);
-}
-
-#[test]
-fn an_invalid_network_setting_skips_reconciliation_but_keeps_the_read() {
-    fake_host::install(host_for_barc_buy());
-    let op = seeded_staged(Kind::Buy, "buy-n", "ob-n", NOW);
-    fake_host::with(|h| {
-        h.seed_state(&ops::store_key(WALLET, "buy-n"), &op);
-        h.set_outbox("ob-n", "success", Some("0x1"), None);
-        h.set_setting(crate::api::NETWORK_SETTING, "moon");
-    });
-    let doc = read_json(buy_description(WALLET));
-    assert_eq!(doc["reconciled"][0]["id"], "buy-n");
-    assert_eq!(doc["reconciled"][0]["status"], "staged");
-    assert_eq!(doc["reconciled"][0]["changed"], false);
-    assert!(
-        doc["reconciled"][0]["reconcile_error"]
-            .as_str()
-            .unwrap()
-            .contains("network-setting-invalid"),
-        "{}",
-        doc["reconciled"][0]
-    );
-    assert_eq!(record("buy-n")["status"], "staged");
-    fake_host::with(|h| assert!(h.inspect_calls.is_empty()));
 }
 
 // ---- pad token buy ----

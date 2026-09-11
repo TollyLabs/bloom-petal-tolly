@@ -1,12 +1,9 @@
 //! The TOLLY public read API and its projections.
 //!
-//! Targets are fixed: a `Network` variant supplies the base URL and an
-//! `ApiRoute` variant supplies the path, so route code cannot direct a request
-//! at an arbitrary host or path. Production (`api.tollylabs.com`, no `/api`
-//! prefix) is the default; the team's stage site (`stage.tollylabs.com/api`)
-//! is reachable only when the owner sets `tolly_network = "stage"`. Both hosts
-//! are declared in `petal.toml` `[[net.allow]]`; the path builders differ only
-//! by the `/api` prefix.
+//! Targets are fixed: the single `Network` (production, `api.tollylabs.com`,
+//! no `/api` prefix) supplies the base URL and an `ApiRoute` variant supplies
+//! the path, so route code cannot direct a request at an arbitrary host or
+//! path. The host is declared in `petal.toml` `[[net.allow]]`.
 
 use alloy_primitives::Address;
 use petal::{DispatchResponse, HostStatus, HttpRequest, SdkError};
@@ -14,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::amount::{addr_hex, is_bytes32_hex, parse_any_address};
 use crate::constants::{
-    API_PROD, API_STAGE, CHAIN, CHAIN_ID, INTERFACE_FEE_BPS, MULTI_ROUTER, PAD, PAD_TOKEN_DECIMALS,
+    API_PROD, CHAIN, CHAIN_ID, INTERFACE_FEE_BPS, MULTI_ROUTER, PAD, PAD_TOKEN_DECIMALS,
     PAD_TOTAL_SUPPLY_RAW, POOL_FEE_PAD, SOURCE_DIGEST, SWAP_ROUTER02,
 };
 use crate::host;
@@ -25,68 +22,29 @@ const MAX_HEALTH_BYTES: usize = 16 * 1024;
 const MAX_LIST_BYTES: usize = 512 * 1024;
 const MAX_DETAIL_BYTES: usize = 64 * 1024;
 
-pub const NETWORK_SETTING: &str = "tolly_network";
-
+/// The network this Petal serves. There is exactly one: the public
+/// production API. Operation records carry its name so that they stay
+/// self-describing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Network {
-    Stage,
     Prod,
 }
 
 impl Network {
-    pub fn parse(value: &str) -> Result<Self, String> {
-        match value.trim() {
-            "stage" => Ok(Self::Stage),
-            "prod" => Ok(Self::Prod),
-            other => Err(format!("unknown network {other:?}; expected stage or prod")),
-        }
-    }
-
     pub fn name(self) -> &'static str {
         match self {
-            Self::Stage => "stage",
             Self::Prod => "prod",
         }
     }
 
     pub fn api_base(self) -> &'static str {
         match self {
-            Self::Stage => API_STAGE,
             Self::Prod => API_PROD,
         }
     }
 
-    /// The network this Petal serves: production unless the owner set
-    /// `tolly_network` (`prod` | `stage`).
-    pub const DEFAULT: Self = Self::Prod;
-
-    pub fn current() -> Result<Self, DispatchResponse> {
-        match host::runtime_setting(NETWORK_SETTING) {
-            Ok(None) => Ok(Self::DEFAULT),
-            Ok(Some(value)) => match Self::parse(&value) {
-                Ok(network) => Ok(network),
-                Err(e) => Err(petal::error(-3, format!("network-setting-invalid: {e}"))),
-            },
-            Err(e) => Err(petal::error(
-                -4,
-                format!("runtime setting: {}", sanitize_host_error(&e.message())),
-            )),
-        }
-    }
-}
-
-/// The network the owner asked for in `tolly_network`, for records of
-/// writes refused before `current()` resolved it: `prod` (also when unset) |
-/// `stage` | `invalid` (the setting names no network) | `unavailable` (the
-/// setting could not be read). Never the raw setting text.
-pub fn requested_network_name() -> String {
-    match host::runtime_setting(NETWORK_SETTING) {
-        Ok(Some(value)) => match Network::parse(&value) {
-            Ok(network) => network.name().to_owned(),
-            Err(_) => "invalid".to_owned(),
-        },
-        Ok(None) => Network::DEFAULT.name().to_owned(),
-        Err(_) => "unavailable".to_owned(),
+    pub fn current() -> Self {
+        Self::Prod
     }
 }
 
@@ -823,38 +781,26 @@ mod tests {
     use super::*;
 
     pub fn barc_detail() -> Value {
-        serde_json::from_str(include_str!("../tests/fixtures/stage-token-barc.json")).unwrap()
+        serde_json::from_str(include_str!("../tests/fixtures/prod-token-barc.json")).unwrap()
     }
 
     #[test]
-    fn urls_are_fixed_per_network_and_route() {
+    fn urls_are_fixed_per_route() {
         let barc: Address = "0x4753c45fb550fecaa143a47968659117e6ffc2ce"
             .parse()
             .unwrap();
+        assert_eq!(Network::current(), Network::Prod);
+        assert_eq!(Network::current().name(), "prod");
         assert_eq!(
-            ApiRoute::Health.url(Network::Stage),
-            "https://stage.tollylabs.com/api/health"
+            ApiRoute::Token(barc).url(Network::current()),
+            "https://api.tollylabs.com/token/0x4753c45fb550fecaa143a47968659117e6ffc2ce"
         );
         assert_eq!(
-            ApiRoute::Markets.url(Network::Stage),
-            "https://stage.tollylabs.com/api/tokens?scope=ours&sort=volume&dir=desc&limit=50"
+            ApiRoute::LaunchesByCreator(barc).url(Network::current()),
+            "https://api.tollylabs.com/tokens?scope=ours&sort=recent&dir=desc&limit=50&creator=0x4753c45fb550fecaa143a47968659117e6ffc2ce"
         );
-        assert_eq!(
-            ApiRoute::Token(barc).url(Network::Stage),
-            "https://stage.tollylabs.com/api/token/0x4753c45fb550fecaa143a47968659117e6ffc2ce"
-        );
-        assert_eq!(
-            ApiRoute::LaunchesByCreator(barc).url(Network::Stage),
-            "https://stage.tollylabs.com/api/tokens?scope=ours&sort=recent&dir=desc&limit=50&creator=0x4753c45fb550fecaa143a47968659117e6ffc2ce"
-        );
-        assert_eq!(Network::parse("prod").unwrap(), Network::Prod);
-        assert_eq!(Network::parse("stage").unwrap(), Network::Stage);
-        assert!(Network::parse("mainnet").is_err());
-        assert_eq!(Network::DEFAULT, Network::Prod);
     }
 
-    /// Production has no `/api` prefix; every URL is a path the manifest's
-    /// `api.tollylabs.com` rule allows (`/health`, `/tokens`, `/token/*`).
     #[test]
     fn prod_urls_have_no_api_prefix() {
         let tolly: Address = "0xbc43ce8dec648ea298c4275559b81d6261c90b67"
@@ -884,24 +830,15 @@ mod tests {
             ApiRoute::LaunchesByCreator(tolly),
         ] {
             let prod = route.url(Network::Prod);
-            let stage = route.url(Network::Stage);
+            assert!(prod.starts_with("https://api.tollylabs.com/"), "{prod}");
             assert!(!prod.contains("/api/"), "{prod}");
-            assert_eq!(
-                stage,
-                prod.replacen(
-                    "https://api.tollylabs.com/",
-                    "https://stage.tollylabs.com/api/",
-                    1
-                ),
-                "the two bases differ only by the /api prefix"
-            );
         }
     }
 
-    /// Captured from `https://api.tollylabs.com` on 2026-09-11: the same JSON
-    /// shapes as stage, the same pad and chain.
+    /// Captured from `https://api.tollylabs.com` on 2026-09-11: health, the
+    /// markets page and a pad token detail.
     #[test]
-    fn prod_fixtures_parse_like_stage() {
+    fn prod_fixtures_parse() {
         let health: Value =
             serde_json::from_str(include_str!("../tests/fixtures/prod-health.json")).unwrap();
         let doc = status_document(Network::Prod, &health, false, 5);
@@ -1084,7 +1021,8 @@ mod tests {
     #[test]
     fn markets_projection_and_liquidity_authority() {
         let list: Value =
-            serde_json::from_str(include_str!("../tests/fixtures/stage-tokens-ours.json")).unwrap();
+            serde_json::from_str(include_str!("../tests/fixtures/prod-tokens-ours-page.json"))
+                .unwrap();
         let doc = markets_document(&list, 1).unwrap();
         assert_eq!(doc["schema"], "tolly.markets.v1");
         assert_eq!(doc["tokens"].as_array().unwrap().len(), 5);
@@ -1119,8 +1057,8 @@ mod tests {
     #[test]
     fn status_projection_flags_pad_drift() {
         let health: Value =
-            serde_json::from_str(include_str!("../tests/fixtures/stage-health.json")).unwrap();
-        let doc = status_document(Network::Stage, &health, false, 5);
+            serde_json::from_str(include_str!("../tests/fixtures/prod-health.json")).unwrap();
+        let doc = status_document(Network::Prod, &health, false, 5);
         assert_eq!(doc["status"], "ok");
         assert_eq!(doc["pad_matches_constants"], true);
         assert_eq!(doc["chain_id_matches_constants"], true);
@@ -1128,11 +1066,11 @@ mod tests {
         assert_eq!(doc["api"]["indexing"]["state"], "live");
         let drifted = json!({ "ok": true, "chainId": 5042, "pad": "0x0000000000000000000000000000000000000001" });
         assert_eq!(
-            status_document(Network::Stage, &drifted, true, 5)["pad_matches_constants"],
+            status_document(Network::Prod, &drifted, true, 5)["pad_matches_constants"],
             false
         );
         assert_eq!(
-            status_document(Network::Stage, &json!({"ok": false}), true, 5)["status"],
+            status_document(Network::Prod, &json!({"ok": false}), true, 5)["status"],
             "degraded"
         );
     }
@@ -1140,7 +1078,8 @@ mod tests {
     #[test]
     fn launch_rows_parse_creator_lists() {
         let list: Value =
-            serde_json::from_str(include_str!("../tests/fixtures/stage-tokens-ours.json")).unwrap();
+            serde_json::from_str(include_str!("../tests/fixtures/prod-tokens-ours-page.json"))
+                .unwrap();
         let rows = launch_rows(&list);
         assert_eq!(rows.len(), 5);
         assert_eq!(rows[0].created_block, Some(20188730));

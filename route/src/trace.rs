@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::amount::{addr_hex, parse_any_address, parse_decimal};
-use crate::api::{self, Network};
+use crate::api::Network;
 use crate::host;
 use crate::ops::{self, Kind, OpError, Operation, Refusal};
 use crate::sanitize_host_error;
@@ -394,7 +394,7 @@ impl WriteTrace {
         let network = self
             .network
             .clone()
-            .unwrap_or_else(api::requested_network_name);
+            .unwrap_or_else(|| Network::current().name().to_owned());
         let mut op = Operation::new(
             id,
             &self.wallet,
@@ -434,7 +434,6 @@ impl WriteTrace {
 /// `record_failure` codes so a refusal classified here agrees with them.
 const CODES: &[(&str, bool)] = &[
     ("writes-disabled", true),
-    ("network-setting-invalid", true),
     ("live-entry-conflict", true),
     ("unrecorded-stage", false),
     ("invalid-request", true),
