@@ -3,14 +3,15 @@
 This Petal exposes TOLLY (launchpad + DEX on Arc, chain id 5042, chain key
 `arc`) as files under `petals/tolly/` at the Bloom mount root — the owner's
 mount point, `~/bloom` on a default Linux install, never `/bloom` (see
-"Paths"). It reads the TOLLY public API
-(stage host) and the chain through Bloom, and it STAGES transactions into the
-wallet owner's Bloom outbox. It never signs, never broadcasts, never calls
-`confirm`. The owner confirms every transaction in Bloom.
+"Paths"). It reads the public TOLLY production API (`api.tollylabs.com`,
+the index behind tollylabs.com) and the chain through Bloom, and it STAGES
+transactions into the wallet owner's Bloom outbox. It never signs, never
+broadcasts, never calls `confirm`. The owner confirms every transaction in
+Bloom with their passkey.
 
-**Money is real.** "Stage" is only the API host; both stage and prod index Arc
-mainnet. Every buy, sell and launch you stage spends the owner's USDC once the
-owner confirms it.
+**Money is real.** The API indexes Arc mainnet (chain id 5042); so does the
+team's stage site if the owner selected it. Every buy, sell and launch you
+stage spends the owner's USDC once the owner confirms it.
 
 ## Read after every write
 
@@ -89,10 +90,10 @@ repeating this, and a staged record carries `cancel_hint`.
    the route file's `last_write`, see "Read after every write"). It is the
    OWNER's runtime setting (`tolly_writes = "enabled"` under
    `[petals.runtime.tolly.values]`), not a TOLLY-side switch. Also check
-   `pad_matches_constants` and `network`: the optional runtime setting
-   `tolly_network` selects the API host; only `stage` is enabled in this
-   build (`prod` is refused with `prod-disabled` until its own manifest
-   release).
+   `pad_matches_constants` and `network`: `prod` (the public production
+   API, the default when the owner set nothing) or `stage` (the team's test
+   site, only when the owner set `tolly_network = "stage"`). Both index Arc
+   mainnet; treat them the same.
 2. `tokens/<address>.json` — look at `provenance` and each venue's
    `execution`. Day-1 executes Uniswap V3 pools (pad tokens through
    SwapRouter02, external tokens through the TOLLY multi router) and V2 pairs
@@ -219,9 +220,9 @@ not returned on the mount:
   before the record planned the token's decimals, an unparseable token or
   amount): nothing is protected, so the stale error is replaced;
 - no record for that `operationId` yet: one is created, `failed`, unbound.
-  Its `network` is the one the owner asked for at the time (`stage`,
-  `prod`, `invalid` when `tolly_network` names no network, `unavailable`
-  when it could not be read); the first write past the gates replaces it
+  Its `network` is the one the owner asked for at the time (`prod`, also
+  when `tolly_network` is unset; `stage`; `invalid` when `tolly_network`
+  names no network; `unavailable` when it could not be read); the first write past the gates replaces it
   with the network the stage actually ran on.
 
 Refusals that cannot reach a record (body did not parse, invalid
@@ -292,8 +293,8 @@ cannot regress the record to `unknown`.
   stays in `txs[]` as `superseded`.
 - Recorded refusals with `retryable: true` — re-POST only after fixing what
   the message names: `writes-disabled` (the owner sets
-  `tolly_writes = "enabled"`), `prod-disabled` / `network-setting-invalid`
-  (`tolly_network` must be `stage` in this build), `live-entry-conflict`
+  `tolly_writes = "enabled"`), `network-setting-invalid` (`tolly_network`
+  must be `prod` or `stage`, or unset), `live-entry-conflict`
   (another operation for the same (wallet, kind, token) still has a pending
   or unrecorded outbox entry; wait for or cancel it), `invalid-request`
   (the body failed validation; re-POST a corrected body, the id stays usable
@@ -379,7 +380,7 @@ most 1000 records per wallet (`scan_truncated: true` in `recent` /
 ## Errors
 
 `-1` not found (unknown token / operation), `-2` denied (writes disabled,
-prod not enabled, host/policy denial, live-entry conflict, unrecorded stage),
+host/policy denial, live-entry conflict, unrecorded stage),
 `-3` invalid input (bad body, cap, bound id, venue rules, funds), `-4` backend
 (API/chain failure, pre-flight revert, fee mismatch, a stage whose record
 could not be written). Every message starts with its code
@@ -402,5 +403,14 @@ it under.
   the quote before lowering `slippage_bps` below the default.
 - Fee-on-transfer tokens (`supports_fot: true`) are refused on V2.
 - Bloom's wallet policy can deny or hard-fail a stage (MEV guard, USD caps
-  without a price for Arc tokens). Test a 1-USDC buy on a throwaway wallet
-  under the owner's real policy before anything larger.
+  without a price for Arc tokens). A fresh Bloom wallet allows NO
+  destinations and NO Petal packages: until the owner has run the policy
+  update in README.md ("Quickstart", step 4) every staged entry shows
+  `[Deny] allowlists.recipients` in its plan and cannot be confirmed. The
+  owner repeats that update after every reinstall of this Petal (the package
+  hash changes). Test a 1-USDC buy on a throwaway wallet under the owner's
+  real policy before anything larger.
+- Confirming is the owner's job and needs their passkey every time: the
+  owner writes `y` into `confirm_path`, Bloom denies that first write and
+  puts a `ceremony_url` in the entry's `ceremony.json`, the owner completes
+  it in a browser, then writes `y` again. Never try to do this for them.

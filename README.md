@@ -1,15 +1,140 @@
 # tolly — Bloom walletFS Petal for TOLLY (Arc)
 
 A Bloom Petal that exposes the TOLLY launchpad and DEX as virtual files:
-market discovery and token detail from the TOLLY public API, best-execution
-quotes across a token's venues from on-chain simulations, and buy / sell /
-launch operations staged into the owner's Bloom outbox. The Petal never signs
-and never broadcasts. Agent-facing semantics live in [AGENTS.md](AGENTS.md);
-this file is for developers.
+market discovery and token detail from the public TOLLY production API
+(`https://api.tollylabs.com`, the index behind [tollylabs.com](https://tollylabs.com)),
+best-execution quotes across a token's venues from on-chain simulations, and
+buy / sell / launch operations staged into the owner's Bloom outbox. The Petal
+never signs and never broadcasts: the owner confirms every transaction in
+Bloom with their passkey. Agent-facing semantics live in
+[AGENTS.md](AGENTS.md); the rest of this file is for developers.
 
-Day-1 targets the STAGE API host (`https://stage.tollylabs.com/api`). Stage is
-only an API host: it indexes Arc mainnet (chain id 5042), so every staged
-transaction spends real USDC once the owner confirms it.
+TOLLY runs on Arc mainnet (chain id 5042, Bloom chain key `arc`). Every
+staged transaction spends real USDC once the owner confirms it.
+
+## Quickstart (Bloom owner)
+
+Requires a running Bloom (v0.2.1 or later) with the `arc` chain configured
+and a passkey wallet (`main` below). The mount root is the owner's mount point,
+`~/bloom` on a default Linux install.
+
+**1. Install the Petal.** From the release archive:
+
+```sh
+bloom petals install ./tolly-v0.2.0.petal.tar.gz
+```
+
+or from source, pinned to a release tag (Bloom builds it with the pinned
+Petal SDK):
+
+```sh
+bloom petals install <repo-url> --ref v0.2.0
+```
+
+Nothing else to configure: the Petal reads production by default. Check it:
+
+```sh
+cat ~/bloom/petals/tolly/status.json     # network "prod", api_base "https://api.tollylabs.com", chain_id 5042
+cat ~/bloom/petals/tolly/markets.json
+```
+
+**2. Enable writes** (reads work without this; every buy/sell/launch is
+refused with `writes-disabled` until the owner opts in). In
+`~/.bloom/config.toml`:
+
+```toml
+[petals.runtime.tolly.values]
+tolly_writes = "enabled"
+```
+
+then restart the Bloom Machine service (`systemctl --user restart
+bloom-machine.service` on a systemd install) and confirm
+`status.json` shows `"writes_enabled": true`.
+
+**3. Find the installed package hash.** Bloom identifies a Petal build by
+its package hash; a fresh wallet policy allows no Petal packages and no
+destinations, so a staged entry cannot be confirmed until the owner
+allows both.
+
+```sh
+python3 -c 'import json,os; print(json.load(open(os.path.expanduser("~/.bloom/petals/store/owners/tolly.json")))["hash"])'
+```
+
+The release notes carry the archive's `package_hash` from `petal package`
+for cross-checking; the hash Bloom reports for the INSTALLED package is the
+one that counts.
+
+**4. Update the wallet policy** (destinations + package). Start from the
+current policy (`cat ~/bloom/wallets/main/policy.json`) and set exactly
+these fields, keeping anything else Bloom already put there:
+
+```json
+{
+  "wallet_id": "main",
+  "allowed_destinations": [
+    { "chain": "arc", "destination": "0x3600000000000000000000000000000000000000" },
+    { "chain": "arc", "destination": "0x53bf6b0684ec7ef91e1387da3d1a1769bc5a6f77" },
+    { "chain": "arc", "destination": "0xcad7ee36ac193bf2eddb7b3e2736c5bdb8269c8b" },
+    { "chain": "arc", "destination": "0xf28c138a39c234554c847dbef467b073ddbd7451" }
+  ],
+  "allowed_petal_packages": ["<INSTALLED_TOLLY_PACKAGE_HASH>"],
+  "required_verifiers": [],
+  "maximum_approval_lifetime_ms": 604800000
+}
+```
+
+The four destinations are everything this Petal ever stages a transaction
+to: USDC (`0x3600…`, exact-amount approvals), Uniswap SwapRouter02
+(`0x53bf…`, pad-token swaps), TollyPad (`0xcad7…`, launches) and the TOLLY
+multi router (`0xf28c…`, external-token swaps). Replace the placeholder with
+the hash from step 3 (keep any other package hashes you rely on). Then run
+the policy ceremony:
+
+```sh
+cp tolly-policy.json ~/bloom/wallets/main/policy.json      # 1. propose: Bloom answers "permission denied" BY DESIGN
+cat ~/bloom/wallets/main/policy-updates/latest/status.json  # 2. read ceremony_url, open it in a browser, approve with the passkey (5 min window)
+cp tolly-policy.json ~/bloom/wallets/main/policy.json      # 3. commit the SAME bytes: accepted; policy_version advances
+```
+
+**Every reinstall of this Petal changes the package hash** (a new build, a
+new version, even the same archive rebuilt) and needs this policy update
+again; the Petal's private store also starts empty (see "Freshness" in
+AGENTS.md). Without it, confirming a staged entry fails with
+`POLICY_APPROVAL_REQUIRED` and Bloom auto-stages a packages-only policy
+update of its own.
+
+**5. Trade.** The agent writes a body to `wallets/main/buy.json` (or
+`sell.json`, `launch.json`) and reads the same file back (AGENTS.md "Read
+after every write"). Each accepted write stages ONE transaction in the
+outbox; the owner confirms it per transaction with the passkey:
+
+```sh
+printf 'y\n' > ~/bloom/<confirm_path>       # first write: denied (EACCES) and a ceremony is opened
+cat ~/bloom/wallets/main/chains/arc/outbox/pending/<outbox_id>/ceremony.json   # ceremony_url + expiry
+                                             # open the URL, approve with the passkey (about 10 minutes)
+printf 'y\n' > ~/bloom/<confirm_path>       # second write: broadcast
+```
+
+`confirm_path` is on the operation record and is RELATIVE to the mount
+root. A buy of an external token is two entries (approve, then swap: re-POST
+the same body after the approve mined); a pad-token buy or a sell without an
+allowance is the same. To abandon a pending entry write `cancel` into the
+same `confirm` file. Start with a 1 USDC buy.
+
+### Using the stage site (team)
+
+The team's test site (`https://stage.tollylabs.com/api`) indexes the same
+chain and contracts. To point the Petal at it:
+
+```toml
+[petals.runtime.tolly.values]
+tolly_network = "stage"
+```
+
+`status.json` then reports `network: "stage"`; every operation record
+carries the network it ran on. Remove the setting (or set `"prod"`) to go
+back. Stage is not a sandbox: it indexes Arc mainnet and its transactions
+spend real USDC.
 
 ## Layout
 
@@ -21,7 +146,7 @@ route/src/
   constants.rs           GENERATED from the frontend sources (scripts/gen-constants.mjs)
   policy.rs              day-1 limits and the write gate
   abi.rs amount.rs fee.rs           pure encoders and arithmetic
-  api.rs                 fixed API targets + projections (venuesForToken port)
+  api.rs                 fixed API targets (prod default, stage by setting) + projections (venuesForToken port)
   chain.rs               the four allowlisted bloom:chain reads
   quote.rs               per-venue quoting, ranking, protection
   ops.rs                 operation record + state machine + reconciliation (run from the staging route's read)
@@ -30,7 +155,7 @@ route/src/
   host.rs                the only host seam; fake_host.rs under cfg(test)
   route_tests.rs         fake-host tests of every route flow (cfg(test))
 route/files/             21 route files, one component each (see AGENTS.md table)
-route/tests/fixtures/    stage API captures, calldata golden vectors
+route/tests/fixtures/    prod + stage API captures, calldata golden vectors
 chain/arc.testnet.json   vendored copy of public/testnet.json (digest in constants.rs)
 scripts/                 build.sh, check-route-architecture.sh, generators
 ```
@@ -46,7 +171,7 @@ cargo test --manifest-path route/Cargo.toml --locked
 petal build --root .            # or scripts/build.sh (installs the pinned CLI)
 petal check --root .
 wasm-tools component wit petal/tolly/<route>.wasm | grep import
-petal package --root . --out dist/tolly-v0.1.3.petal.tar.gz
+petal package --root . --out dist/tolly-v0.2.0.petal.tar.gz
 bloom petals build . && bloom petals install .    # needs a Bloom daemon
 ```
 
@@ -78,6 +203,11 @@ Expected route count: 21.
   `venuesForToken` on the captured BARC detail (V4 + two V3), a pad detail
   without `pools`, a recoverable V2, state-machine transitions (every
   `tx_inspect` state), non-regression of terminal states, idempotency digest.
+  API targets: production URLs carry no `/api` prefix and differ from the
+  stage URLs only by it; the production captures (`prod-health.json`,
+  `prod-tokens-ours.json`, `prod-token-tolly.json`, 2026-09-11) project
+  through `status.json`, `markets.json` and `tokens/<address>.json` exactly
+  like the stage captures (same pad, same chain, same shapes).
 - Route flows against the fake host (`route/src/route_tests.rs`): status,
   markets, token detail, buy/sell quotes (V4 best but unsupported, QuoterV2
   revert, sell normalisation), the buy walk (writes disabled → -2 and a
@@ -96,7 +226,10 @@ Expected route count: 21.
   persists it and lists it in `reconciled[]` with `changed: true`; a sell is
   not reconciled by the buy route; the 8-operation bound with
   `reconcile_truncated`; an invalid network setting skips reconciliation
-  with a `reconcile_error` and never inspects),
+  with a `reconcile_error` and never inspects), the network selection (prod
+  is the default and the only host reached when nothing is set; `tolly_network
+  = "stage"` routes every read of a write flow to the stage host and records
+  `network: "stage"`; an unknown value is `-3 network-setting-invalid`),
   sell "all", sell completion net of gas, launch with a frozen salt and index
   completion, launch completion under an API outage, V4 pool-key and
   quote-representation tickets, positions bounds, the B1 chain allowlist on
@@ -107,8 +240,9 @@ Expected route count: 21.
   keeps its id; refusals on a live or terminal record are appended to a
   bounded `refusals[]` with the status kept; a refusal on a bound record
   with nothing staged replaces its stale error; unrecorded-stage and
-  live-entry refusals; unknown-token, prod and invalid-network refusals, and
-  the record's `network` rewritten to the resolved one on the first stage;
+  live-entry refusals; unknown-token, unreachable-network and
+  invalid-network refusals, and the record's `network` rewritten to the
+  resolved one on the first stage;
   sell ownership via planned decimals; launch refusals; a no-op re-POST
   refreshes `last_write_ms`), and the secret boundary (no URL/key ever reaches a
   record, a marker or a response; no route file references the secret
@@ -148,12 +282,21 @@ No test contacts a network or a Bloom daemon.
 - **D9** `max_fee_per_gas` / `max_priority_fee_per_gas` left `None` (the
   TxEngine sets fees and estimates gas); the `eth_call{from}` pre-flight is
   mandatory and a hard refuse (`-4 preflight-reverted`).
-- **D10** Prod is a separate later manifest (`api.tollylabs.com`, no `/api`
-  prefix). The stage `[[net.allow]] binding` only re-points the HTTPS
-  authority; the path policy stays, so it is NOT a prod switch.
-- **D11** No `/api/swaps` widening: buy/sell completion = balance delta of the
+- **D10** Production is the default network: `tolly_network` unset or
+  `"prod"` reads `https://api.tollylabs.com` (no `/api` prefix); `"stage"`
+  reads the team's `https://stage.tollylabs.com/api`. Both hosts are declared
+  in `petal.toml` as separate `[[net.allow]]` rules (`tolly-prod`,
+  `tolly-stage`), each with `GET` and the exact paths that host serves
+  (`/health`, `/tokens`, `/token/*`, with or without the `/api` prefix).
+  Bloom matches a fetch against the URL's host, method and PATH only (query
+  strings are not part of the rule; `*` is one path segment), so the two
+  rules cannot be confused. A rule's `binding` lets an operator re-point
+  that rule's HTTPS authority only; methods and paths stay, so neither
+  binding is a network switch. The `Network` variant is the only source of a
+  base URL; a path builder cannot reach the other host.
+- **D11** No `/swaps` widening: buy/sell completion = balance delta of the
   output token (frozen at stage vs read after success); launch completion =
-  `GET /api/tokens?creator=<wallet>&scope=ours` matched on `created_block`.
+  `GET /tokens?creator=<wallet>&scope=ours` matched on `created_block`.
 - **D12** `tx_confirm` is never called: it would gain nothing and could
   only lose the simulation. Outbox confirms are passkey-per-transaction by
   construction on Bloom v0.2.1 (host fact below): every confirm mints a
@@ -297,7 +440,27 @@ No test contacts a network or a Bloom daemon.
   (the last-write marker, D13). All live in the `state` namespace; nothing
   secret is stored.
 - Runtime settings read through `bloom:env`: `tolly_writes` (the write
-  gate) and `tolly_network` (`stage` default; `prod` refused until D10).
+  gate) and `tolly_network` (`prod` default; `stage` by explicit setting;
+  anything else is `-3 network-setting-invalid`, D10).
+- A fresh Bloom wallet's policy (`wallets/<w>/policy.json`) has empty
+  `allowed_destinations` and `allowed_petal_packages`. An empty destination
+  set denies every recipient (the plan of a staged entry shows `[Deny]
+  allowlists.recipients`), and a package hash missing from
+  `allowed_petal_packages` makes the confirm fail with
+  `POLICY_APPROVAL_REQUIRED` while Bloom auto-stages a packages-only policy
+  update. Hence the Quickstart's single policy update covering both, and the
+  note that every reinstall (new package hash) needs it again. Verified live
+  2026-09-11 on Bloom v0.2.1 (policy_version 3 for wallet `main`: the four
+  destinations + the installed package; the next staged buy showed `[Pass]
+  allowlists.recipients`).
+- A policy update is a two-write ceremony: the first `cp` onto
+  `wallets/<w>/policy.json` is answered "permission denied" and creates
+  `wallets/<w>/policy-updates/pending/<op>/` (`latest/status.json` carries
+  `ceremony_url`, `expiry_ms`, `status`); after the passkey ceremony the
+  same bytes are written again and accepted. Outbox confirms follow the
+  same shape per transaction: the first write of `y` into an entry's
+  `confirm` is denied and the entry's `ceremony.json` carries the
+  `ceremony_url`; the second write broadcasts.
 - Route cache TTLs are the SDK's: quotes `http_read_spec(2_000)` (2 s, a
   pure read), `positions.json` and `operations/[id].json`
   `account_read_spec()` (5 s; the record is a pure store projection, D14),
@@ -340,7 +503,13 @@ No test contacts a network or a Bloom daemon.
 ## Not implemented (follow-ups)
 
 - V4 execution (TollyV4Router / UniversalRouter / Permit2 paths).
-- Prod manifest release; `markets/all.json` (scope=all with the spam filter).
+- Live smoke of v0.2.0 against production (a 1 USDC buy through the
+  production API on Bloom v0.2.1, then a confirmed approve + swap under the
+  owner's real policy). v0.1.2/v0.1.3 were smoked against the stage host
+  only; the production API differs from stage only by the `/api` prefix
+  (verified 2026-09-11: `/health` 200, `/tokens` 200, `/token/<addr>` 200,
+  `/api/...` 404, identical JSON fields, same pad and chain).
+- `markets/all.json` (scope=all with the spam filter).
 - Mounted smoke of v0.1.2 on Bloom v0.2.1 (Ubuntu 24.04, wallet `main`,
   Arc, 2026-09-11): a refused write (`amount_usdc: 300`) left
   `last_write` (`outcome: refused`, `cap-exceeded`, `record_effect:
