@@ -1,0 +1,26 @@
+name: Release Petal
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Pinned to the full commit of the Petal tooling this repository builds
+    # against (the same revision route/Cargo.toml, petal-build.toml and
+    # scripts/build.sh pin). Do not replace it with a branch or tag.
+    uses: bloom-directory/petal/.github/workflows/release-petal.yml@73c5b06a77599368fbc79fb7947a629b5b4c630e
+    with:
+      petal-name: tolly
+      petal-tooling-ref: "73c5b06a77599368fbc79fb7947a629b5b4c630e"
+      build-command: scripts/build.sh
+      package-root: .
+      expected-route-count: 21

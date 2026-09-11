@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  PETAL_REV: 73c5b06a77599368fbc79fb7947a629b5b4c630e
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain and WASM target
+        run: |
+          rustup show
+          rustup target add wasm32-unknown-unknown
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            route
+      - name: Route architecture check
+        run: bash scripts/check-route-architecture.sh
+      - name: Format route crate
+        run: cargo fmt --manifest-path route/Cargo.toml -- --check
+      - name: Test route crate
+        run: cargo test --manifest-path route/Cargo.toml --locked
+      - name: Clippy route crate
+        run: cargo clippy --manifest-path route/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Install wasm-tools and wit-bindgen
+        run: |
+          cargo install wasm-tools --version 1.249.0 --locked
+          cargo install wit-bindgen-cli --version 0.61.1 --locked
+      - name: Install the pinned Petal CLI
+        run: cargo install --git https://github.com/bloom-directory/petal --rev "$PETAL_REV" --locked bloom-petal-cli
+      - name: Build route components and check capabilities
+        run: PETAL_BIN="$HOME/.cargo/bin/petal" bash scripts/build.sh
+      - name: Package and assert the route count and WIT digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          "$HOME/.cargo/bin/petal" package --root . --out dist/ci.petal.tar.gz | tee dist/package.json
+          grep -Fq '"routes": 21' dist/package.json
+          grep -Fq '"wit_digest": "f52579e1f964eb0302c418f08817593d8f2fc38a434b5f71b483972c56839254"' dist/package.json
+      - name: No stage host in the default build, no secrets in the components
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -rlE 'infura|alchemy|/v3/[0-9a-f]{32}|sk-[A-Za-z0-9]{20}' petal/ route/src
