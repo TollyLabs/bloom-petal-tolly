@@ -120,21 +120,6 @@ the same body after the approve mined); a pad-token buy or a sell without an
 allowance is the same. To abandon a pending entry write `cancel` into the
 same `confirm` file. Start with a 1 USDC buy.
 
-### Using the stage site (team)
-
-The team's test site (`https://stage.tollylabs.com/api`) indexes the same
-chain and contracts. To point the Petal at it:
-
-```toml
-[petals.runtime.tolly.values]
-tolly_network = "stage"
-```
-
-`status.json` then reports `network: "stage"`; every operation record
-carries the network it ran on. Remove the setting (or set `"prod"`) to go
-back. Stage is not a sandbox: it indexes Arc mainnet and its transactions
-spend real USDC.
-
 ## Layout
 
 ```
@@ -145,7 +130,7 @@ route/src/
   constants.rs           GENERATED from the frontend sources (scripts/gen-constants.mjs)
   policy.rs              day-1 limits and the write gate
   abi.rs amount.rs fee.rs           pure encoders and arithmetic
-  api.rs                 fixed API targets (prod default, stage by setting) + projections (venuesForToken port)
+  api.rs                 fixed API targets (the production host) + projections (venuesForToken port)
   chain.rs               the four allowlisted bloom:chain reads
   quote.rs               per-venue quoting, ranking, protection
   ops.rs                 operation record + state machine + reconciliation (run from the staging route's read)
@@ -154,7 +139,7 @@ route/src/
   host.rs                the only host seam; fake_host.rs under cfg(test)
   route_tests.rs         fake-host tests of every route flow (cfg(test))
 route/files/             21 route files, one component each (see AGENTS.md table)
-route/tests/fixtures/    prod + stage API captures, calldata golden vectors
+route/tests/fixtures/    production API captures, calldata golden vectors
 chain/arc.testnet.json   vendored copy of public/testnet.json (digest in constants.rs)
 scripts/                 build.sh, check-route-architecture.sh, generators
 ```
@@ -202,11 +187,12 @@ Expected route count: 21.
   `venuesForToken` on the captured BARC detail (V4 + two V3), a pad detail
   without `pools`, a recoverable V2, state-machine transitions (every
   `tx_inspect` state), non-regression of terminal states, idempotency digest.
-  API targets: production URLs carry no `/api` prefix and differ from the
-  stage URLs only by it; the production captures (`prod-health.json`,
-  `prod-tokens-ours.json`, `prod-token-tolly.json`, 2026-09-11) project
-  through `status.json`, `markets.json` and `tokens/<address>.json` exactly
-  like the stage captures (same pad, same chain, same shapes).
+  API targets: every URL is built on `https://api.tollylabs.com` with no
+  `/api` prefix, and `petal.toml` declares exactly that host; the
+  production captures (`prod-health.json`, `prod-tokens-ours.json`,
+  `prod-tokens-ours-page.json`, `prod-token-tolly.json`,
+  `prod-token-barc.json`, 2026-09-11) project through `status.json`,
+  `markets.json` and `tokens/<address>.json`.
 - Route flows against the fake host (`route/src/route_tests.rs`): status,
   markets, token detail, buy/sell quotes (V4 best but unsupported, QuoterV2
   revert, sell normalisation), the buy walk (writes disabled → -2 and a
@@ -224,11 +210,9 @@ Expected route count: 21.
   hint; a `buy.json` read reconciles a staged buy to `confirmed`/`completed`,
   persists it and lists it in `reconciled[]` with `changed: true`; a sell is
   not reconciled by the buy route; the 8-operation bound with
-  `reconcile_truncated`; an invalid network setting skips reconciliation
-  with a `reconcile_error` and never inspects), the network selection (prod
-  is the default and the only host reached when nothing is set; `tolly_network
-  = "stage"` routes every read of a write flow to the stage host and records
-  `network: "stage"`; an unknown value is `-3 network-setting-invalid`),
+  `reconcile_truncated`), the API host (production is the only network:
+  no runtime setting selects one, every read of a write flow goes to
+  `api.tollylabs.com` and the record carries `network: "prod"`),
   sell "all", sell completion net of gas, launch with a frozen salt and index
   completion, launch completion under an API outage, V4 pool-key and
   quote-representation tickets, positions bounds, the B1 chain allowlist on
@@ -239,9 +223,8 @@ Expected route count: 21.
   keeps its id; refusals on a live or terminal record are appended to a
   bounded `refusals[]` with the status kept; a refusal on a bound record
   with nothing staged replaces its stale error; unrecorded-stage and
-  live-entry refusals; unknown-token, unreachable-network and
-  invalid-network refusals, and the record's `network` rewritten to the
-  resolved one on the first stage;
+  live-entry refusals; unknown-token and unreachable-host refusals, and
+  the refused record binding on the first stage;
   sell ownership via planned decimals; launch refusals; a no-op re-POST
   refreshes `last_write_ms`), and the secret boundary (no URL/key ever reaches a
   record, a marker or a response; no route file references the secret
@@ -281,18 +264,16 @@ No test contacts a network or a Bloom daemon.
 - **D9** `max_fee_per_gas` / `max_priority_fee_per_gas` left `None` (the
   TxEngine sets fees and estimates gas); the `eth_call{from}` pre-flight is
   mandatory and a hard refuse (`-4 preflight-reverted`).
-- **D10** Production is the default network: `tolly_network` unset or
-  `"prod"` reads `https://api.tollylabs.com` (no `/api` prefix); `"stage"`
-  reads the team's `https://stage.tollylabs.com/api`. Both hosts are declared
-  in `petal.toml` as separate `[[net.allow]]` rules (`tolly-prod`,
-  `tolly-stage`), each with `GET` and the exact paths that host serves
-  (`/health`, `/tokens`, `/token/*`, with or without the `/api` prefix).
-  Bloom matches a fetch against the URL's host, method and PATH only (query
-  strings are not part of the rule; `*` is one path segment), so the two
-  rules cannot be confused. A rule's `binding` lets an operator re-point
-  that rule's HTTPS authority only; methods and paths stay, so neither
-  binding is a network switch. The `Network` variant is the only source of a
-  base URL; a path builder cannot reach the other host.
+- **D10** One network: the Petal reads `https://api.tollylabs.com` (no
+  `/api` prefix) and nothing else. The host is declared in `petal.toml` as
+  the single `[[net.allow]]` rule (`tolly-prod`) with `GET` and the exact
+  paths it serves (`/health`, `/tokens`, `/token/*`). Bloom matches a fetch
+  against the URL's host, method and PATH only (query strings are not part
+  of the rule; `*` is one path segment). The rule's `binding` lets an
+  operator re-point its HTTPS authority only; methods and paths stay. The
+  `Network` type is the only source of a base URL; no runtime setting
+  selects a host, and a test pins the manifest to the host the route
+  reaches.
 - **D11** No `/swaps` widening: buy/sell completion = balance delta of the
   output token (frozen at stage vs read after success); launch completion =
   `GET /tokens?creator=<wallet>&scope=ours` matched on `created_block`.
@@ -438,9 +419,8 @@ No test contacts a network or a Bloom daemon.
   check reads instead of scanning records) and `tolly/lastwrite/<wallet>`
   (the last-write marker, D13). All live in the `state` namespace; nothing
   secret is stored.
-- Runtime settings read through `bloom:env`: `tolly_writes` (the write
-  gate) and `tolly_network` (`prod` default; `stage` by explicit setting;
-  anything else is `-3 network-setting-invalid`, D10).
+- Runtime setting read through `bloom:env`: `tolly_writes` (the write
+  gate). No setting selects a network (D10).
 - A fresh Bloom wallet's policy (`wallets/<w>/policy.json`) has empty
   `allowed_destinations` and `allowed_petal_packages`. An empty destination
   set denies every recipient (the plan of a staged entry shows `[Deny]
@@ -504,10 +484,10 @@ No test contacts a network or a Bloom daemon.
 - V4 execution (TollyV4Router / UniversalRouter / Permit2 paths).
 - Live smoke of v0.2.0 against production (a 1 USDC buy through the
   production API on Bloom v0.2.1, then a confirmed approve + swap under the
-  owner's real policy). v0.1.2/v0.1.3 were smoked against the stage host
-  only; the production API differs from stage only by the `/api` prefix
-  (verified 2026-09-11: `/health` 200, `/tokens` 200, `/token/<addr>` 200,
-  `/api/...` 404, identical JSON fields, same pad and chain).
+  owner's real policy). v0.1.2/v0.1.3 were smoked against the team's
+  internal index only; the production API was verified 2026-09-11
+  (`/health` 200, `/tokens` 200, `/token/<addr>` 200, `/api/...` 404, the
+  JSON fields the fixtures show, same pad and chain).
 - `markets/all.json` (scope=all with the spam filter).
 - Mounted smoke of v0.1.2 on Bloom v0.2.1 (Ubuntu 24.04, wallet `main`,
   Arc, 2026-09-11): a refused write (`amount_usdc: 300`) left

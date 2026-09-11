@@ -9,9 +9,9 @@ transactions into the wallet owner's Bloom outbox. It never signs, never
 broadcasts, never calls `confirm`. The owner confirms every transaction in
 Bloom with their passkey.
 
-**Money is real.** The API indexes Arc mainnet (chain id 5042); so does the
-team's stage site if the owner selected it. Every buy, sell and launch you
-stage spends the owner's USDC once the owner confirms it.
+**Money is real.** The API indexes Arc mainnet (chain id 5042). Every buy,
+sell and launch you stage spends the owner's USDC once the owner confirms
+it.
 
 ## Read after every write
 
@@ -90,10 +90,8 @@ repeating this, and a staged record carries `cancel_hint`.
    the route file's `last_write`, see "Read after every write"). It is the
    OWNER's runtime setting (`tolly_writes = "enabled"` under
    `[petals.runtime.tolly.values]`), not a TOLLY-side switch. Also check
-   `pad_matches_constants` and `network`: `prod` (the public production
-   API, the default when the owner set nothing) or `stage` (the team's test
-   site, only when the owner set `tolly_network = "stage"`). Both index Arc
-   mainnet; treat them the same.
+   `pad_matches_constants` and `network`, which is always `prod` (the
+   public production API on Arc mainnet).
 2. `tokens/<address>.json` — look at `provenance` and each venue's
    `execution`. Day-1 executes Uniswap V3 pools (pad tokens through
    SwapRouter02, external tokens through the TOLLY multi router) and V2 pairs
@@ -220,10 +218,8 @@ not returned on the mount:
   before the record planned the token's decimals, an unparseable token or
   amount): nothing is protected, so the stale error is replaced;
 - no record for that `operationId` yet: one is created, `failed`, unbound.
-  Its `network` is the one the owner asked for at the time (`prod`, also
-  when `tolly_network` is unset; `stage`; `invalid` when `tolly_network`
-  names no network; `unavailable` when it could not be read); the first write past the gates replaces it
-  with the network the stage actually ran on.
+  Its `network` is `prod`, the only network; the first write past the
+  gates binds it.
 
 Refusals that cannot reach a record (body did not parse, invalid
 `operationId`, id bound to a different request or kind, wallet address
@@ -293,8 +289,7 @@ cannot regress the record to `unknown`.
   stays in `txs[]` as `superseded`.
 - Recorded refusals with `retryable: true` — re-POST only after fixing what
   the message names: `writes-disabled` (the owner sets
-  `tolly_writes = "enabled"`), `network-setting-invalid` (`tolly_network`
-  must be `prod` or `stage`, or unset), `live-entry-conflict`
+  `tolly_writes = "enabled"`), `live-entry-conflict`
   (another operation for the same (wallet, kind, token) still has a pending
   or unrecorded outbox entry; wait for or cancel it), `invalid-request`
   (the body failed validation; re-POST a corrected body, the id stays usable
