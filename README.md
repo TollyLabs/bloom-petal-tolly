@@ -24,12 +24,11 @@ and a passkey wallet (`main` below). The mount root is the owner's mount point,
 bloom petals install ./tolly-v0.2.0.petal.tar.gz
 ```
 
-or from source, pinned to a release tag (Bloom builds it with the pinned
-Petal SDK):
-
-```sh
-bloom petals install <repo-url> --ref v0.2.0
-```
+The archive and its `SHA256SUMS` are attached to each GitHub release of
+[TollyLabs/bloom-petal-tolly](https://github.com/TollyLabs/bloom-petal-tolly).
+Bloom v0.2.1 installs source repositories only from its own `bloom-directory`
+organisation, so `bloom petals install <github-url> --ref <tag>` works for this
+Petal once Bloom lists it there; until then install the release archive.
 
 Nothing else to configure: the Petal reads production by default. Check it:
 
