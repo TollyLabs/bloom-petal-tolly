@@ -3,10 +3,7 @@
 petal::route_file!(
     spec: petal::http_read_spec(5_000),
     read: |_ctx: &petal::Ctx| {
-        let network = match crate::api::Network::current() {
-            Ok(network) => network,
-            Err(response) => return response,
-        };
+        let network = crate::api::Network::current();
         let health = match crate::api::fetch_json(network, &crate::api::ApiRoute::Health) {
             Ok(health) => health,
             Err(error) => return error.response(),

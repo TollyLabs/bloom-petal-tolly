@@ -14,10 +14,7 @@ petal::route_file!(
             Ok(value) => value,
             Err(response) => return response,
         };
-        let network = match crate::api::Network::current() {
-            Ok(network) => network,
-            Err(response) => return response,
-        };
+        let network = crate::api::Network::current();
         let detail = match crate::api::token_detail(network, address) {
             Ok(detail) => detail,
             Err(response) => return response,

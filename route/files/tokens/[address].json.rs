@@ -9,10 +9,7 @@ petal::route_file!(
             Ok(address) => address,
             Err(response) => return response,
         };
-        let network = match crate::api::Network::current() {
-            Ok(network) => network,
-            Err(response) => return response,
-        };
+        let network = crate::api::Network::current();
         match crate::api::token_detail(network, address) {
             Ok(detail) => petal::read_json_value(&crate::api::token_document(&detail)),
             Err(response) => response,
