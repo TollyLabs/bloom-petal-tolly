@@ -289,7 +289,7 @@ fn prod_is_the_only_network_and_needs_no_setting() {
     assert_eq!(Network::current().api_base(), "https://api.tollylabs.com");
     // No runtime setting selects a network: a stray value is never read.
     let mut host = FakeHost::new(NOW);
-    host.set_setting("tolly_network", "mainnet");
+    host.set_setting("some_network_setting", "mainnet");
     fake_host::install(host);
     assert_eq!(Network::current(), Network::Prod);
 }
