@@ -434,7 +434,6 @@ impl WriteTrace {
 /// `record_failure` codes so a refusal classified here agrees with them.
 const CODES: &[(&str, bool)] = &[
     ("writes-disabled", true),
-    ("prod-disabled", true),
     ("network-setting-invalid", true),
     ("live-entry-conflict", true),
     ("unrecorded-stage", false),

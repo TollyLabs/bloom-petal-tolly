@@ -22,13 +22,16 @@ use crate::trace;
 
 const WALLET: &str = "main";
 const NOW: u64 = 1_789_070_000_000;
-const HEALTH_URL: &str = "https://stage.tollylabs.com/api/health";
+/// Production is the default network: no `/api` prefix.
+const HEALTH_URL: &str = "https://api.tollylabs.com/health";
 const MARKETS_URL: &str =
-    "https://stage.tollylabs.com/api/tokens?scope=ours&sort=volume&dir=desc&limit=50";
-const BARC_URL: &str =
-    "https://stage.tollylabs.com/api/token/0x4753c45fb550fecaa143a47968659117e6ffc2ce";
+    "https://api.tollylabs.com/tokens?scope=ours&sort=volume&dir=desc&limit=50";
+const BARC_URL: &str = "https://api.tollylabs.com/token/0x4753c45fb550fecaa143a47968659117e6ffc2ce";
 const CALENDAR_URL: &str =
-    "https://stage.tollylabs.com/api/token/0x2005cd22ea3c1acfaa9e01d3a178f356bb03c81c";
+    "https://api.tollylabs.com/token/0x2005cd22ea3c1acfaa9e01d3a178f356bb03c81c";
+/// The team's stage site, reached only under `tolly_network = "stage"`.
+const STAGE_BARC_URL: &str =
+    "https://stage.tollylabs.com/api/token/0x4753c45fb550fecaa143a47968659117e6ffc2ce";
 
 fn wallet_address() -> Address {
     "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -124,7 +127,7 @@ fn seeded_staged(kind: Kind, id: &str, outbox_id: &str, updated_ms: u64) -> ops:
         WALLET,
         wallet_address(),
         kind,
-        Network::Stage.name(),
+        Network::Prod.name(),
         "d".into(),
         json!({}),
         updated_ms,
@@ -165,7 +168,8 @@ const V3_500_OUT: u128 = 1_200_000_000_000_000_000_000; // 1200 BARC
 const V3_3000_OUT: u128 = 1_100_000_000_000_000_000_000; // 1100 BARC
 const V4_OUT: u128 = 1_300_000_000_000_000_000_000; // 1300 BARC (best, unsupported)
 
-/// A host that serves the stage API fixtures, the wallet, and a BARC buy of
+/// A host that serves the API fixtures (captured on stage, served at the
+/// production URLs), the wallet, and a BARC buy of
 /// 25 USDC across the three venues.
 fn host_for_barc_buy() -> FakeHost {
     let mut host = FakeHost::new(NOW);
@@ -250,10 +254,11 @@ fn buy_body(id: &str, amount: &str, extra: Value) -> Vec<u8> {
 #[test]
 fn status_projects_health_and_write_gate() {
     fake_host::install(host_for_barc_buy());
-    let health = fetch_json(Network::Stage, &ApiRoute::Health).unwrap();
-    let doc = status_document(Network::Stage, &health, policy::writes_enabled(), NOW);
+    let health = fetch_json(Network::Prod, &ApiRoute::Health).unwrap();
+    let doc = status_document(Network::Prod, &health, policy::writes_enabled(), NOW);
     assert_eq!(doc["schema"], "tolly.status.v1");
-    assert_eq!(doc["network"], "stage");
+    assert_eq!(doc["network"], "prod");
+    assert_eq!(doc["api_base"], "https://api.tollylabs.com");
     assert_eq!(doc["chain_id"], 5042);
     assert_eq!(doc["writes_enabled"], true);
     assert_eq!(doc["pad_matches_constants"], true);
@@ -267,30 +272,63 @@ fn api_failures_map_to_backend_and_not_found() {
     host.reply_http(MARKETS_URL, 500, &json!({"error": "boom"}));
     host.reply_http(BARC_URL, 404, &json!({"error": "unknown token"}));
     fake_host::install(host);
-    let err = fetch_json(Network::Stage, &ApiRoute::Health).unwrap_err();
+    let err = fetch_json(Network::Prod, &ApiRoute::Health).unwrap_err();
     assert_eq!(code(&err.response()), -4);
-    let err = fetch_json(Network::Stage, &ApiRoute::Markets).unwrap_err();
+    let err = fetch_json(Network::Prod, &ApiRoute::Markets).unwrap_err();
     assert_eq!(code(&err.response()), -4);
-    assert_eq!(code(&token_detail(Network::Stage, barc()).unwrap_err()), -1);
+    assert_eq!(code(&token_detail(Network::Prod, barc()).unwrap_err()), -1);
     // No reply scripted at all -> backend, sanitized.
     assert_eq!(
-        code(&token_detail(Network::Stage, calendar()).unwrap_err()),
+        code(&token_detail(Network::Prod, calendar()).unwrap_err()),
         -4
     );
 }
 
 #[test]
-fn prod_network_is_refused_until_its_manifest_release() {
+fn prod_is_the_default_and_stage_is_an_explicit_setting() {
+    fake_host::install(FakeHost::new(NOW));
+    assert_eq!(Network::current().unwrap(), Network::Prod);
+    assert_eq!(crate::api::requested_network_name(), "prod");
     let mut host = FakeHost::new(NOW);
     host.set_setting(crate::api::NETWORK_SETTING, "prod");
     fake_host::install(host);
-    assert_eq!(code(&Network::current().unwrap_err()), -2);
+    assert_eq!(Network::current().unwrap(), Network::Prod);
+    let mut host = FakeHost::new(NOW);
+    host.set_setting(crate::api::NETWORK_SETTING, " stage ");
+    fake_host::install(host);
+    assert_eq!(Network::current().unwrap(), Network::Stage);
+    assert_eq!(crate::api::requested_network_name(), "stage");
     let mut host = FakeHost::new(NOW);
     host.set_setting(crate::api::NETWORK_SETTING, "mainnet");
     fake_host::install(host);
     assert_eq!(code(&Network::current().unwrap_err()), -3);
-    fake_host::install(FakeHost::new(NOW));
-    assert_eq!(Network::current().unwrap(), Network::Stage);
+    assert_eq!(crate::api::requested_network_name(), "invalid");
+}
+
+#[test]
+fn stage_setting_routes_every_read_to_the_stage_host() {
+    let mut host = host_for_barc_buy();
+    host.set_setting(crate::api::NETWORK_SETTING, "stage");
+    host.reply_http(STAGE_BARC_URL, 200, &barc_detail());
+    fake_host::install(host);
+    let r = route_buy(
+        WALLET,
+        &buy_body("buy-stage", "25", json!({"allow_worse_venue": true})),
+    );
+    assert_eq!(r, DispatchResponse::Write, "{}", message(&r));
+    let rec = record("buy-stage");
+    assert_eq!(rec["status"], "staged");
+    assert_eq!(rec["network"], "stage");
+    fake_host::with(|h| {
+        assert!(!h.http_calls.is_empty());
+        for call in &h.http_calls {
+            assert!(
+                call.url.starts_with("https://stage.tollylabs.com/api/"),
+                "{}",
+                call.url
+            );
+        }
+    });
 }
 
 #[test]
@@ -298,7 +336,7 @@ fn token_detail_refuses_an_address_mismatch() {
     let mut host = FakeHost::new(NOW);
     host.reply_http(CALENDAR_URL, 200, &barc_detail());
     fake_host::install(host);
-    let err = token_detail(Network::Stage, calendar()).unwrap_err();
+    let err = token_detail(Network::Prod, calendar()).unwrap_err();
     assert_eq!(code(&err), -4);
     assert!(message(&err).contains("does not match"));
 }
@@ -306,7 +344,7 @@ fn token_detail_refuses_an_address_mismatch() {
 #[test]
 fn buy_quote_ranks_v4_best_but_executes_v3_and_quotes_at_net() {
     fake_host::install(host_for_barc_buy());
-    let detail = token_detail(Network::Stage, barc()).unwrap();
+    let detail = token_detail(Network::Prod, barc()).unwrap();
     let q = quote::quote(&detail, Side::Buy, u(GROSS), 500);
     assert_eq!(q.fee_raw, u(50_000));
     assert_eq!(q.amount_to_pool_raw, u(NET));
@@ -375,7 +413,7 @@ fn quoter_revert_means_no_fill_and_pad_tokens_skip_the_fee() {
         "eth_call: execution reverted https://rpc.example/v3/SECRET",
     );
     fake_host::install(host);
-    let detail = token_detail(Network::Stage, calendar()).unwrap();
+    let detail = token_detail(Network::Prod, calendar()).unwrap();
     let q = quote::quote(&detail, Side::Buy, u(GROSS), 500);
     assert_eq!(q.fee_raw, U256::ZERO, "pad tokens pay no interface fee");
     assert_eq!(q.amount_to_pool_raw, u(GROSS));
@@ -414,7 +452,7 @@ fn sell_quote_normalises_native_v4_output_to_six_decimals() {
     );
     host.call_u256(QUOTER_V2, "c6a5026a", u(29_600));
     fake_host::install(host);
-    let detail = token_detail(Network::Stage, barc()).unwrap();
+    let detail = token_detail(Network::Prod, barc()).unwrap();
     let q = quote::quote(&detail, Side::Sell, amount, 500);
     assert_eq!(q.fee_raw, U256::ZERO);
     assert_eq!(q.venues[0].venue.kind.name(), "v4");
@@ -464,7 +502,7 @@ fn writes_are_denied_until_the_owner_enables_them() {
     assert_eq!(rec["next_action"], "retry");
     assert_eq!(rec["last_write_ms"], NOW);
     assert_eq!(rec["kind"], "buy");
-    assert_eq!(rec["network"], "stage");
+    assert_eq!(rec["network"], "prod");
     assert_eq!(rec["wallet_address"], addr_hex(wallet_address()));
     assert_eq!(rec["request"]["operationId"], "buy-1");
     assert_eq!(rec["txs"], json!([]));
@@ -743,7 +781,7 @@ fn unrecorded_stage_refusals_are_appended_and_conflicts_create_records() {
 }
 
 #[test]
-fn unknown_token_and_prod_refusals_are_recorded() {
+fn unknown_token_and_network_refusals_are_recorded() {
     let mut host = host_for_barc_buy();
     host.reply_http(CALENDAR_URL, 404, &json!({"error": "unknown token"}));
     fake_host::install(host);
@@ -757,31 +795,33 @@ fn unknown_token_and_prod_refusals_are_recorded() {
     assert_eq!(rec["error"]["retryable"], true);
     assert_eq!(last_write()["response_code"], -1);
 
+    // The owner points the Petal at the stage site, where nothing answers:
+    // a backend refusal recorded under the network the owner asked for.
     let mut host = host_for_barc_buy();
-    host.set_setting(crate::api::NETWORK_SETTING, "prod");
+    host.set_setting(crate::api::NETWORK_SETTING, "stage");
     fake_host::install(host);
     assert_eq!(
-        code(&route_buy(WALLET, &buy_body("buy-prod", "25", json!({})))),
-        -2
+        code(&route_buy(WALLET, &buy_body("buy-net-sw", "25", json!({})))),
+        -4
     );
-    let rec = record("buy-prod");
-    assert_eq!(rec["error"]["code"], "prod-disabled");
-    assert_eq!(rec["network"], "prod", "the network the owner asked for");
+    let rec = record("buy-net-sw");
+    assert_eq!(rec["error"]["code"], "backend");
+    assert_eq!(rec["network"], "stage", "the network the owner asked for");
     assert_eq!(rec["request_sha256"], "");
-    // The setting goes back to stage: the same id binds, stages, and the
+    // The setting goes back to prod: the same id binds, stages, and the
     // record's network is the one the stage actually ran on.
     fake_host::with(|h| {
-        h.set_setting(crate::api::NETWORK_SETTING, "stage");
+        h.set_setting(crate::api::NETWORK_SETTING, "prod");
         h.now_ms = NOW + 1;
     });
     let r = route_buy(
         WALLET,
-        &buy_body("buy-prod", "25", json!({"allow_worse_venue": true})),
+        &buy_body("buy-net-sw", "25", json!({"allow_worse_venue": true})),
     );
     assert_eq!(r, DispatchResponse::Write, "{}", message(&r));
-    let rec = record("buy-prod");
+    let rec = record("buy-net-sw");
     assert_eq!(rec["status"], "staged");
-    assert_eq!(rec["network"], "stage", "the network the stage ran on");
+    assert_eq!(rec["network"], "prod", "the network the stage ran on");
     assert_eq!(rec["request_sha256"].as_str().unwrap().len(), 64);
 
     // A setting that names no network is recorded as `invalid`, never as
@@ -955,7 +995,7 @@ fn launch_refusals_are_recorded_unbound_and_bound_by_the_first_stage() {
     assert_eq!(r, DispatchResponse::Write, "{}", message(&r));
     let rec = record("launch-r");
     assert_eq!(rec["status"], "staged");
-    assert_eq!(rec["network"], "stage");
+    assert_eq!(rec["network"], "prod");
     let bound = rec["request_sha256"].as_str().unwrap().to_owned();
     assert_eq!(bound.len(), 64);
     // Now the other launch is foreign: refused, record untouched.
@@ -1476,7 +1516,7 @@ fn claim_race_reports_the_existing_record() {
         WALLET,
         wallet_address(),
         Kind::Buy,
-        Network::Stage.name(),
+        Network::Prod.name(),
         "d".into(),
         json!({}),
         NOW,
@@ -1526,7 +1566,7 @@ fn toll_for_mismatch_refuses_the_write() {
     fake_host::with(|h| {
         let _ = h; // first scripted reply (50_000) is consumed by the quote below only once
     });
-    let detail = token_detail(Network::Stage, barc()).unwrap();
+    let detail = token_detail(Network::Prod, barc()).unwrap();
     let _ = quote::quote(&detail, Side::Buy, u(GROSS), 500); // consumes the 50_000 reply
     let r = route_buy(
         WALLET,
@@ -1845,7 +1885,7 @@ fn sell_completion_is_labelled_net_of_gas_and_completes_at_zero_delta() {
         WALLET,
         wallet_address(),
         Kind::Sell,
-        Network::Stage.name(),
+        Network::Prod.name(),
         "d".into(),
         json!({}),
         NOW,
@@ -1904,7 +1944,7 @@ fn v4_venues_need_a_matching_pool_key_and_quote_representation() {
     fake_host::with(|h| {
         let _ = h.fetch_for_test(BARC_URL);
     });
-    let parsed = token_detail(Network::Stage, barc()).unwrap();
+    let parsed = token_detail(Network::Prod, barc()).unwrap();
     let q = quote::quote(&parsed, Side::Buy, u(GROSS), 500);
     let v4 = q
         .venues
@@ -1928,7 +1968,7 @@ fn v4_venues_need_a_matching_pool_key_and_quote_representation() {
     fake_host::with(|h| {
         let _ = h.fetch_for_test(BARC_URL);
     });
-    let parsed = token_detail(Network::Stage, barc()).unwrap();
+    let parsed = token_detail(Network::Prod, barc()).unwrap();
     let q = quote::quote(&parsed, Side::Buy, u(GROSS), 500);
     let v4 = q
         .venues
@@ -2565,7 +2605,7 @@ fn launch_with_dev_buy_approves_the_pad_first_and_completes_from_the_index() {
             Some("0xd2"),
             Some(&json!({"outcome": "success", "tx_hash": "0xd2", "block_number": 20188730})),
         );
-        let url = ApiRoute::LaunchesByCreator(wallet_address()).url(Network::Stage);
+        let url = ApiRoute::LaunchesByCreator(wallet_address()).url(Network::Prod);
         h.reply_http(
             &url,
             200,
@@ -2592,13 +2632,13 @@ fn launch_with_dev_buy_approves_the_pad_first_and_completes_from_the_index() {
     );
     assert_eq!(doc["result"]["created_block"], 20188730);
     fake_host::with(|h| {
-        let url = ApiRoute::LaunchesByCreator(wallet_address()).url(Network::Stage);
+        let url = ApiRoute::LaunchesByCreator(wallet_address()).url(Network::Prod);
         assert!(url.contains("creator=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         assert!(
             h.http_calls
                 .iter()
-                .all(|c| c.url.starts_with("https://stage.tollylabs.com/api/")),
-            "only the stage API is reached"
+                .all(|c| c.url.starts_with("https://api.tollylabs.com/")),
+            "only the production API is reached"
         );
         h.assert_chain_calls_allowlisted();
     });
@@ -2618,7 +2658,7 @@ fn launch_completion_survives_an_api_outage() {
             Some("0xe1"),
             Some(&json!({"outcome": "success", "tx_hash": "0xe1", "block_number": 20188730})),
         );
-        let url = ApiRoute::LaunchesByCreator(wallet_address()).url(Network::Stage);
+        let url = ApiRoute::LaunchesByCreator(wallet_address()).url(Network::Prod);
         h.reply_http(&url, 500, &json!({"error": "boom"}));
         h.reply_http(&url, 200, &markets());
     });
@@ -2803,7 +2843,7 @@ fn records_and_errors_never_carry_host_internals() {
     );
     fake_host::install(host);
     // Exhaust the first (good) replies so the failing ones are served.
-    let detail = token_detail(Network::Stage, barc()).unwrap();
+    let detail = token_detail(Network::Prod, barc()).unwrap();
     let _ = quote::quote(&detail, Side::Buy, u(GROSS), 500);
     let r = route_buy(
         WALLET,
@@ -2898,7 +2938,7 @@ fn v2_venue_buys_route_through_swap_with_toll_v2_with_a_non_zero_floor() {
         &format!("wallets/{WALLET}/address"),
         addr_hex(wallet_address()).as_bytes(),
     );
-    host.reply_http(&ApiRoute::Token(token).url(Network::Stage), 200, &detail);
+    host.reply_http(&ApiRoute::Token(token).url(Network::Prod), 200, &detail);
     // pair.token0() == USDC; reserves (USDC 18187e6, WARP 1.23456789e24)
     let mut token0 = [0u8; 32];
     token0[12..].copy_from_slice(USDC.as_slice());
