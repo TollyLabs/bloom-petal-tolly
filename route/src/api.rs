@@ -835,6 +835,19 @@ mod tests {
         }
     }
 
+    /// The manifest declares exactly the host the `Network` reaches.
+    #[test]
+    fn manifest_allows_only_the_production_host() {
+        let manifest = include_str!("../../petal.toml");
+        assert_eq!(manifest.matches("[[net.allow]]").count(), 1);
+        assert!(manifest.contains("host = \"api.tollylabs.com\""));
+        let host = Network::current()
+            .api_base()
+            .trim_start_matches("https://")
+            .to_owned();
+        assert!(manifest.contains(&format!("host = \"{host}\"")));
+    }
+
     /// Captured from `https://api.tollylabs.com` on 2026-09-11: health, the
     /// markets page and a pad token detail.
     #[test]

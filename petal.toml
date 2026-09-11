@@ -11,8 +11,8 @@ summary = "Read TOLLY launchpad and DEX markets on Arc from the public productio
 [caps]
 allowed = ["bloom:http", "bloom:store", "bloom:tx.outbox", "bloom:chain", "bloom:vfs.read"]
 
-# PRODUCTION API host: the default network (`tolly_network` unset or "prod").
-# Paths are matched on the URL path only (query strings are not part of the
+# The public production API host, the only host this Petal reaches. Paths
+# are matched on the URL path only (query strings are not part of the
 # rule): GET /health, GET /tokens?..., GET /token/<address>. The binding lets
 # an operator re-point the HTTPS authority only; methods and paths stay.
 [[net.allow]]
@@ -20,15 +20,6 @@ binding = "tolly-prod"
 host = "api.tollylabs.com"
 methods = ["GET"]
 paths = ["/health", "/tokens", "/token/*"]
-
-# STAGE API host: the team's test site, reached only when the owner sets
-# `tolly_network = "stage"` under [petals.runtime.tolly.values]. Same paths
-# under the /api prefix. Both hosts index Arc mainnet.
-[[net.allow]]
-binding = "tolly-stage"
-host = "stage.tollylabs.com"
-methods = ["GET"]
-paths = ["/api/health", "/api/tokens", "/api/token/*"]
 
 [store]
 namespaces = ["state"]
