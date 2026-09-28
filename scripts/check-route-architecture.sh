@@ -69,7 +69,7 @@ fi
 # route id). The operation record route therefore cannot inspect: it is a pure
 # store projection under the 5 s account cache, and reconciliation lives in
 # the read handlers of the routes that stage (buy/sell/launch).
-record_route='route/files/operations/[id].json.rs'
+record_route='route/files/wallets/[wallet]/[index]/operations/[id].json.rs'
 if [[ ! -f "$record_route" ]]; then
   echo "route architecture check: missing $record_route" >&2
   failed=1

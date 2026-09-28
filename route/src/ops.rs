@@ -937,21 +937,11 @@ pub fn read_operation(wallet: &str, id: &str) -> DispatchResponse {
     if let Err(e) = validate_id(id) {
         return petal::error(-3, e);
     }
-    let mut op = match load(wallet, id) {
+    let op = match load(wallet, id) {
         Ok(Some(op)) => op,
         Ok(None) => return petal::error(-1, "no such operation"),
         Err(e) => return petal::error(-4, e),
     };
-    // Old account-zero records carry unnumbered confirm paths. Project from
-    // the stored outbox ids for this read; keep the durable record untouched.
-    if op.confirm_path.is_some()
-        && let Some(index) = op.latest_live()
-    {
-        op.confirm_path = Some(tx::confirm_path(&op.wallet, &op.txs[index].outbox_id));
-    }
-    for entry in &mut op.txs {
-        entry.confirm_path = tx::confirm_path(&op.wallet, &entry.outbox_id);
-    }
     let mut doc = match serde_json::to_value(&op) {
         Ok(Value::Object(map)) => map,
         Ok(_) | Err(_) => return petal::error(-4, "operation record serialize"),

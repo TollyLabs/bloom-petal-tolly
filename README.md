@@ -14,7 +14,9 @@ staged transaction spends real USDC once the owner confirms it.
 
 ## Account-scoped routes
 
-Select a wallet and numbered account under `/petals/tolly/wallets/<wallet>/<account>/`. Petal operations and settings live below that directory. Account 0 keeps its existing private records; other accounts have separate stores. The core wallet tree remains `/wallets/<wallet>/<account>/`.
+Select a wallet and numbered account under `/petals/tolly/wallets/<wallet>/<index>/` for buy, sell, launch, operations and positions. Markets, tokens, quotes, status and documentation remain at the Petal root.
+
+`[wallet]` and adjacent `[index]` are explicit route captures. Bloom resolves them against the live core wallet projection and supplies trusted `bloom.wallet` and `bloom.account` context. Every numbered account, including 0, has a separate private store. Legacy unnumbered settings and sessions are not carried into account 0. The core wallet tree remains `/wallets/<wallet>/<index>/`.
 
 This HD-account release requires a Machine with scoped Petal routing and trusted `bloom.wallet`/`bloom.account` parameters. Installing it early on an older Machine removes Tolly wallet operations from that host. Pin it only with the Machine release that provides those parameters.
 
@@ -90,8 +92,8 @@ cp tolly-policy.json ~/bloom/wallets/main/policy.json      # 3. commit the SAME 
 
 **Every reinstall of this Petal changes the package hash** (a new build, a
 new version, even the same archive rebuilt) and needs this policy update
-again; the Petal's private store also starts empty (see "Freshness" in
-AGENTS.md). Without it, confirming a staged entry fails with
+again. Modern numbered private stores carry through signed package lineage;
+legacy unnumbered state needs the pre-upgrade recovery workflow in AGENTS.md. Without it, confirming a staged entry fails with
 `POLICY_APPROVAL_REQUIRED` and Bloom auto-stages a packages-only policy
 update of its own.
 
@@ -338,10 +340,10 @@ No test contacts a network or a Bloom daemon.
   hash, an entry from another route); `ops::classify_error` keeps it a
   non-regressing `unknown` with the note "outbox inspection: <reason> (entry
   not staged by this route?)".
-- The Petal's private store is namespaced by PACKAGE hash
+- Historical releases used a private store namespaced by PACKAGE hash
   (`bloom-petals/src/vm.rs` passes the package hash as the store's
   `petal_hash`; `private_store.rs` `store_is_namespaced_by_hash`): every
-  new build starts with an empty store. Observed 2026-09-11 when v0.1.2
+  new build started with an empty store. Observed 2026-09-11 when v0.1.2
   replaced v0.1.0: `operations/` was empty and the v0.1.0 record
   `buy-tolly-1` was gone while its outbox entry `0001-08786` stayed
   pending (and is not inspectable by the new package). Documented in
@@ -495,3 +497,6 @@ No test contacts a network or a Bloom daemon.
   destinations allowlist), launches, sells.
 - Release workflow (`release-petal.yml`, `expected-route-count: 21`) and the
   GitHub extraction (`git subtree split -P petals/tolly`).
+
+
+Before upgrading from routes without `[index]`, finish and reconcile pending operations using the installed build. Retain its package and private records until recovery is complete; do not delete them. A new route/package cannot inspect outbox entries staged by the old route/package. Core wallet custody and outbox entries remain intact. Modern numbered account stores are carried through signed package lineage; the legacy unnumbered store is not automatically imported.

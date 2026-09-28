@@ -1847,7 +1847,7 @@ fn operation_record_read_is_a_pure_store_projection() {
 }
 
 #[test]
-fn old_account_zero_operation_projects_numbered_confirm_paths_without_rewriting_store() {
+fn operation_projection_preserves_stored_confirm_paths() {
     let mut op = seeded_staged(Kind::Buy, "old-buy", "ob-old", NOW);
     let old_path = "wallets/main/chains/arc/outbox/pending/ob-old/confirm";
     op.confirm_path = Some(old_path.into());
@@ -1857,9 +1857,8 @@ fn old_account_zero_operation_projects_numbered_confirm_paths_without_rewriting_
     fake_host::install(host);
     let before = record("old-buy");
     let doc = read_json(ops::read_operation(WALLET, "old-buy"));
-    let numbered = "wallets/main/0/chains/arc/outbox/pending/ob-old/confirm";
-    assert_eq!(doc["confirm_path"], numbered);
-    assert_eq!(doc["txs"][0]["confirm_path"], numbered);
+    assert_eq!(doc["confirm_path"], old_path);
+    assert_eq!(doc["txs"][0]["confirm_path"], old_path);
     assert_eq!(record("old-buy"), before, "the legacy record stays intact");
     fake_host::with(|h| assert_eq!(h.store_writes(), 0));
 }
@@ -2528,7 +2527,7 @@ fn no_route_file_touches_the_secret_namespace() {
     }
     let mut files = Vec::new();
     walk(&root, &mut files);
-    assert_eq!(files.len(), 19, "expected route count");
+    assert_eq!(files.len(), 22, "expected route count");
     for file in files {
         let source = std::fs::read_to_string(&file).unwrap();
         for forbidden in [

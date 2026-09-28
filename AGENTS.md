@@ -55,7 +55,9 @@ a silent write as a staged transaction.
 
 ## Account-scoped routes
 
-Select a wallet and numbered account under `/petals/tolly/wallets/<wallet>/<account>/`. Petal operations and settings live below that directory. Account 0 keeps its existing private records; other accounts have separate stores. The core wallet tree remains `/wallets/<wallet>/<account>/`.
+Select a wallet and numbered account under `/petals/tolly/wallets/<wallet>/<index>/` for buy, sell, launch, operations and positions. Markets, tokens, quotes, status and documentation remain at the Petal root.
+
+`[wallet]` and adjacent `[index]` are explicit route captures. Bloom resolves them against the live core wallet projection and supplies trusted `bloom.wallet` and `bloom.account` context. Every numbered account, including 0, has a separate private store. Legacy unnumbered settings and sessions are not carried into account 0. The core wallet tree remains `/wallets/<wallet>/<index>/`.
 
 ## Paths
 
@@ -360,14 +362,13 @@ parameterized file's real size on that file's first lookup), and a `cat`
 right after such a listing can return 0 bytes — `stat`/`cat` the exact path
 again and it renders. `bloom vfs cat` always returns the body.
 
-Records live in the Petal's private store, which Bloom namespaces by
-PACKAGE hash: installing a new build of this Petal starts with an empty
-store. Records, the live-entry index and the last-write marker of the
-previous build are gone, while its outbox entries stay pending in Bloom and
-the new build cannot inspect them (inspection is bound to the package and
-route that staged them). Before upgrading, let in-flight operations settle
-or have the owner cancel their entries; after upgrading, treat a pending
-entry you cannot see in any record as foreign and cancel it the same way. `positions.json` is cached for 5 s. Listings load at
+Records live in separate numbered account stores, including account 0. Signed
+package lineage carries modern account records, the live-entry index and
+last-write marker across releases. Legacy unnumbered stores are not imported.
+Retain the installed old build and its state until its pending entries settle
+or the owner cancels them. Outbox inspection remains bound to the package and
+route that staged the entry, so a changed route cannot reconcile an old entry.
+`positions.json` is cached for 5 s. Listings load at
 most 1000 records per wallet (`scan_truncated: true` in `recent` /
 `bounds.scan` when more exist).
 
@@ -408,3 +409,6 @@ it under.
   owner writes `y` into `confirm_path`, Bloom denies that first write and
   puts a `ceremony_url` in the entry's `ceremony.json`, the owner completes
   it in a browser, then writes `y` again. Never try to do this for them.
+
+
+Before upgrading from routes without `[index]`, finish and reconcile pending operations using the installed build. Retain its package and private records until recovery is complete; do not delete them. A new route/package cannot inspect outbox entries staged by the old route/package. Core wallet custody and outbox entries remain intact. Modern numbered account stores are carried through signed package lineage; the legacy unnumbered store is not automatically imported.
