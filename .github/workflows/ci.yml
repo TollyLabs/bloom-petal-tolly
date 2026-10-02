@@ -47,7 +47,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           "$HOME/.cargo/bin/petal" package --root . --out dist/ci.petal.tar.gz | tee dist/package.json
-          grep -Fq '"routes": 21' dist/package.json
+          grep -Fq '"routes": 22' dist/package.json
           grep -Fq '"wit_digest": "f52579e1f964eb0302c418f08817593d8f2fc38a434b5f71b483972c56839254"' dist/package.json
       - name: No stage host in the default build, no secrets in the components
         shell: bash

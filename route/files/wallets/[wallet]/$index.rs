@@ -1,13 +1,2 @@
-petal::route_file!(
-    spec: petal::static_dir_spec(),
-    list: {
-        let mut children = vec![
-            petal::writable("buy.json"),
-            petal::writable("sell.json"),
-            petal::writable("launch.json"),
-            petal::file("positions.json"),
-        ];
-        children.push(petal::dir("operations"));
-        children
-    }
-);
+// Bloom supplies live wallet/index directory inventory from the core projection.
+petal::route_file!(spec: petal::static_dir_spec(), list: Vec::new());

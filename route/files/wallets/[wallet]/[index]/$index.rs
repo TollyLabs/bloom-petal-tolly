@@ -1,0 +1,1 @@
+petal::route_file!(spec: petal::static_dir_spec(), list: { let mut children = petal::files(&["buy.json", "sell.json", "launch.json", "positions.json"]); children.push(petal::dir("operations")); children });

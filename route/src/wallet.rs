@@ -29,12 +29,15 @@ pub fn check_wallet_id(wallet: &str) -> Result<(), DispatchResponse> {
     Ok(())
 }
 
-/// The wallet's account-0 EVM owner/signer address, read from Bloom's
+/// The selected account's EVM owner/signer address, read from Bloom's
 /// canonical account-scoped host VFS path
-/// (`wallets/<wallet>/0/address.evm`, relative to the Bloom mount root).
+/// (`wallets/<wallet>/<account>/address.evm`, relative to the Bloom mount root).
 pub fn wallet_address(wallet: &str) -> Result<Address, String> {
-    let bytes = host::vfs_read(&format!("wallets/{wallet}/0/address.evm"), 128)
-        .map_err(|e| format!("wallet address: {}", sanitize_host_error(&e.message())))?;
+    let bytes = host::vfs_read(
+        &format!("wallets/{wallet}/{}/address.evm", crate::account::number()),
+        128,
+    )
+    .map_err(|e| format!("wallet address: {}", sanitize_host_error(&e.message())))?;
     let value = std::str::from_utf8(&bytes)
         .map_err(|_| "wallet address is not UTF-8")?
         .trim();

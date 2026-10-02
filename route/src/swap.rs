@@ -1,5 +1,5 @@
 //! Buy and sell: the one-transaction-per-write step function behind
-//! `wallets/[wallet]/buy.json` and `wallets/[wallet]/sell.json`.
+//! `buy.json` and `sell.json`.
 //!
 //! Each POST with the same `operationId` advances the operation by at most one
 //! staged transaction: `approve` (exact amount, only when the allowance is
@@ -150,7 +150,7 @@ fn intent(
     })
 }
 
-/// `wallets/[wallet]/buy.json` write. Every outcome, accepted or refused,
+/// `buy.json` write. Every outcome, accepted or refused,
 /// is persisted by the trace (see `trace`): Bloom delivers mounted writes
 /// asynchronously, so the response alone would be invisible to the agent.
 pub fn route_buy(wallet: &str, body: &[u8]) -> DispatchResponse {
@@ -186,7 +186,7 @@ fn buy_flow(wallet: &str, body: &[u8], trace: &mut WriteTrace) -> DispatchRespon
     }
 }
 
-/// `wallets/[wallet]/sell.json` write (traced like `route_buy`).
+/// `sell.json` write (traced like `route_buy`).
 pub fn route_sell(wallet: &str, body: &[u8]) -> DispatchResponse {
     if let Err(r) = check_wallet_id(wallet) {
         return r;
@@ -965,14 +965,15 @@ pub(crate) fn acknowledge_unrecorded_stage(
         return Err(petal::error(
             -2,
             format!(
-                "unrecorded-stage: a {} transaction to {} was staged at {} ms but its record could not be written; inspect the wallet's outbox under wallets/{}/chains/arc/outbox/ at the Bloom mount root (confirm or cancel that entry), then re-POST with acknowledge_unrecorded_stage:true",
+                "unrecorded-stage: a {} transaction to {} was staged at {} ms but its record could not be written; inspect the wallet's outbox under wallets/{}/{}/chains/arc/outbox/ at the Bloom mount root (confirm or cancel that entry), then re-POST with acknowledge_unrecorded_stage:true",
                 serde_json::to_value(marker.step)
                     .ok()
                     .and_then(|v| v.as_str().map(str::to_owned))
                     .unwrap_or_default(),
                 marker.to,
                 marker.staged_ms,
-                op.wallet
+                op.wallet,
+                crate::account::number()
             ),
         ));
     }

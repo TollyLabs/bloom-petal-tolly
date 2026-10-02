@@ -17,6 +17,7 @@
 //! - `host`: the only seam to the Bloom host (fake host under `cfg(test)`).
 
 pub mod abi;
+pub mod account;
 pub mod amount;
 pub mod api;
 pub mod chain;

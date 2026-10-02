@@ -114,7 +114,7 @@ pub struct TxEntry {
     pub role: Step,
     pub to: String,
     pub outbox_id: String,
-    /// `wallets/<wallet>/chains/arc/outbox/pending/<outbox_id>/confirm`,
+    /// `wallets/<wallet>/<account>/chains/arc/outbox/pending/<outbox_id>/confirm`,
     /// relative to the Bloom mount root (`tx::confirm_path`).
     pub confirm_path: String,
     /// Where `confirm_path` is rooted (`tx::MOUNT_NOTE`).
@@ -553,22 +553,6 @@ pub fn list_ids(wallet: &str) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 
-pub fn list_wallets() -> Result<Vec<String>, String> {
-    let mut wallets: Vec<String> = host::store_list(STORE_PREFIX, MAX_LIST_BYTES)
-        .map_err(|e| format!("operation list: {}", sanitize_host_error(&e.message())))?
-        .into_iter()
-        .filter_map(|key| {
-            key.strip_prefix(STORE_PREFIX)
-                .and_then(|rest| rest.split('/').next())
-                .map(str::to_owned)
-        })
-        .filter(|w| !w.is_empty())
-        .collect();
-    wallets.sort();
-    wallets.dedup();
-    Ok(wallets)
-}
-
 /// The most recent operations of a wallet (by `updated_ms`), optionally of
 /// one kind. Every record is loaded before sorting, up to
 /// `OPS_SCAN_MAX_OPS` ids; `Recent::truncated` says whether that bound hit.
@@ -588,7 +572,7 @@ pub fn recent(wallet: &str, kind: Option<Kind>, max: usize) -> Result<Recent, St
         .filter_map(|id| load(wallet, id).ok().flatten())
         .filter(|op| kind.is_none_or(|k| op.kind == k))
         .collect();
-    ops.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms));
+    ops.sort_by_key(|op| std::cmp::Reverse(op.updated_ms));
     ops.truncate(max);
     Ok(Recent {
         ops,
@@ -969,9 +953,8 @@ pub fn read_operation(wallet: &str, id: &str) -> DispatchResponse {
 /// Where an agent goes to make this record current.
 fn refresh_hint(op: &Operation) -> String {
     format!(
-        "this file is a cached projection of the stored record (up to ~5 s stale) and never inspects the outbox: outbox inspection is bound to the staging route, so read wallets/{}/{}.json to reconcile this record (its `reconciled` lists what changed), then re-read this file",
-        op.wallet,
-        op.kind.name()
+        "this file is a cached projection of the stored record (up to ~5 s stale) and never inspects the outbox: outbox inspection is bound to the staging route, so read {} to reconcile this record (its `reconciled` lists what changed), then re-read this file",
+        crate::account::link(&op.wallet, &format!("{}.json", op.kind.name()))
     )
 }
 
@@ -1117,7 +1100,9 @@ pub fn route_read_side(wallet: &str, kind: Kind, recent_max: usize) -> RouteRead
             "file": format!("operations/{}.json", op.id),
         }));
     }
-    recent.ops.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms));
+    recent
+        .ops
+        .sort_by_key(|op| std::cmp::Reverse(op.updated_ms));
     recent.ops.truncate(recent_max);
     RouteReadSide {
         reconciled,

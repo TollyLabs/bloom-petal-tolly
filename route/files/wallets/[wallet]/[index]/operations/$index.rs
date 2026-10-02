@@ -1,5 +1,5 @@
 fn children(ctx: &petal::Ctx) -> Result<Vec<petal::RouteChild>, petal::DispatchResponse> {
-    let wallet = petal::wallet_param(ctx)?;
+    let wallet = crate::account::wallet_param(ctx)?;
     crate::wallet::check_wallet_id(wallet)?;
     crate::ops::list_ids(wallet)
         .map(|ids| ids.into_iter().map(|id| petal::file(format!("{id}.json"))).collect())

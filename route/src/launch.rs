@@ -1,4 +1,4 @@
-//! Launch: `wallets/[wallet]/launch.json` — `TollyPad.createToken` with an
+//! Launch: `launch.json` — `TollyPad.createToken` with an
 //! optional dev buy (D5: default 0, max 140 USDC, staged as approve then
 //! createToken). The salt is drawn from the host RNG at the first stage and
 //! frozen in the record so a re-POST reuses it. Logo pinning is out of scope
@@ -145,7 +145,7 @@ pub fn launch_description(wallet: &str) -> DispatchResponse {
     }))
 }
 
-/// `wallets/[wallet]/launch.json` write. Every outcome is persisted by the
+/// `launch.json` write. Every outcome is persisted by the
 /// trace (see `trace`): Bloom delivers mounted writes asynchronously.
 pub fn route_launch(wallet: &str, body: &[u8]) -> DispatchResponse {
     if let Err(r) = check_wallet_id(wallet) {

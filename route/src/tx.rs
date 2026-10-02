@@ -17,7 +17,7 @@
 //! confirm into an unprompted broadcast. A `tx_confirm` from this Petal would
 //! therefore gain nothing, and with `acknowledge_warnings = true` it would
 //! bypass simulation. The owner confirms by writing to `confirm_path`
-//! (`wallets/<wallet>/chains/arc/outbox/pending/<outbox_id>/confirm`, relative
+//! (`wallets/<wallet>/<account>/chains/arc/outbox/pending/<outbox_id>/confirm`, relative
 //! to the Bloom mount root, see `MOUNT_NOTE`).
 
 use alloy_primitives::Address;
@@ -89,7 +89,7 @@ pub fn stage(wallet: &str, to: Address, data: &[u8]) -> Result<StagedTransaction
 }
 
 /// The confirm file of a staged entry, RELATIVE to the Bloom mount root:
-/// `wallets/<wallet>/chains/arc/outbox/pending/<outbox_id>/confirm`.
+/// `wallets/<wallet>/<account>/chains/arc/outbox/pending/<outbox_id>/confirm`.
 ///
 /// The mount point is wherever the owner's fstab puts it (`~/bloom` on a
 /// default Linux install); it is not `/bloom`: `mount_path = "/bloom"` in
@@ -97,7 +97,10 @@ pub fn stage(wallet: &str, to: Address, data: &[u8]) -> Result<StagedTransaction
 /// and a literal `/bloom/...` gets ENOENT. Agents prefix the root themselves;
 /// `MOUNT_NOTE` travels with every emitted path (`confirm_path_note`).
 pub fn confirm_path(wallet: &str, outbox_id: &str) -> String {
-    format!("wallets/{wallet}/chains/{CHAIN}/outbox/pending/{outbox_id}/confirm")
+    format!(
+        "wallets/{wallet}/{}/chains/{CHAIN}/outbox/pending/{outbox_id}/confirm",
+        crate::account::number()
+    )
 }
 
 /// Emitted next to every `confirm_path` as `confirm_path_note`.
@@ -134,7 +137,10 @@ mod tests {
     #[test]
     fn confirm_path_names_the_outbox_entry_relative_to_the_mount_root() {
         let path = confirm_path("main", "ob-7");
-        assert_eq!(path, "wallets/main/chains/arc/outbox/pending/ob-7/confirm");
+        assert_eq!(
+            path,
+            "wallets/main/0/chains/arc/outbox/pending/ob-7/confirm"
+        );
         assert!(
             !path.starts_with('/'),
             "never absolute: the mount point is the owner's"

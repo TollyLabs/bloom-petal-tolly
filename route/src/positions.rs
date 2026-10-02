@@ -1,4 +1,4 @@
-//! `wallets/[wallet]/positions.json`: the two views of the wallet's USDC and
+//! `positions.json`: the two views of the wallet's USDC and
 //! the balance of every token this wallet's operations touched (critique
 //! M11: symbols/decimals come from the frozen records, only `balanceOf` is
 //! read, and the token set is bounded).

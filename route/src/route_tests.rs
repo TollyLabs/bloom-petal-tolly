@@ -823,6 +823,87 @@ fn buy_refuses_a_better_unsupported_venue_unless_accepted() {
 }
 
 #[test]
+fn account_one_buy_confirm_flow_uses_only_selected_account_paths() {
+    crate::account::with_selected_for_test(1, "wallets/main/1/", || {
+        let mut host = host_for_barc_buy();
+        host.remove_vfs("wallets/main/0/address.evm");
+        host.seed_vfs(
+            "wallets/main/1/address.evm",
+            b"0xAAaAaAaaAaAaaaaAaAAaAaaAaAAAAaAAAAAAAAAA\n",
+        );
+        fake_host::install(host);
+        let body = buy_body("buy-account-one", "25", json!({"allow_worse_venue": true}));
+
+        assert_eq!(route_buy(WALLET, &body), DispatchResponse::Write);
+        let first = read_json(ops::read_operation(WALLET, "buy-account-one"));
+        assert_eq!(first["status"], "staged");
+        assert_eq!(first["step"], "approve");
+        assert_eq!(
+            first["confirm_path"],
+            "wallets/main/1/chains/arc/outbox/pending/ob-1/confirm"
+        );
+        assert_eq!(first["txs"][0]["confirm_path"], first["confirm_path"]);
+        assert!(
+            first["refresh"]
+                .as_str()
+                .unwrap()
+                .contains("wallets/main/1/buy.json")
+        );
+
+        fake_host::with(|host| {
+            host.set_outbox(
+                "ob-1",
+                "success",
+                Some("0xa1"),
+                Some(&json!({"outcome":"success","tx_hash":"0xa1","block_number":20185400})),
+            );
+            host.reply_chain(
+                "eth_call",
+                Some(USDC),
+                "dd62ed3e",
+                Ok(serde_json::to_string(&format!("0x{:064x}", GROSS)).unwrap()),
+            );
+        });
+        assert_eq!(route_buy(WALLET, &body), DispatchResponse::Write);
+        let second = read_json(ops::read_operation(WALLET, "buy-account-one"));
+        assert_eq!(second["status"], "staged");
+        assert_eq!(second["step"], "swap");
+        assert_eq!(
+            second["confirm_path"],
+            "wallets/main/1/chains/arc/outbox/pending/ob-2/confirm"
+        );
+        assert_eq!(second["txs"][0]["confirm_path"], first["confirm_path"]);
+        assert_eq!(second["txs"][1]["confirm_path"], second["confirm_path"]);
+
+        fake_host::with(|host| {
+            host.set_outbox(
+                "ob-2",
+                "success",
+                Some("0xb2"),
+                Some(&json!({"outcome":"success","tx_hash":"0xb2","block_number":20185500})),
+            );
+            host.reply_chain(
+                "eth_call",
+                Some(barc()),
+                &hex(&abi::erc20_balance_of(wallet_address())),
+                Ok(serde_json::to_string(&format!("0x{:064x}", V3_500_OUT)).unwrap()),
+            );
+        });
+        let completed = reconciled_record(Kind::Buy, "buy-account-one");
+        assert_eq!(completed["status"], "completed");
+        assert_eq!(completed["result"]["tx_hash"], "0xb2");
+        assert_eq!(completed["txs"][0]["confirm_path"], first["confirm_path"]);
+        assert_eq!(completed["txs"][1]["confirm_path"], second["confirm_path"]);
+        assert!(!completed.to_string().contains("wallets/main/0/"));
+        fake_host::with(|host| {
+            assert_eq!(host.staged.len(), 2, "one approval and one swap");
+            assert!(host.staged.iter().all(|tx| tx.wallet == WALLET));
+            assert_eq!(host.inspect_calls, ["ob-1", "ob-2"]);
+        });
+    });
+}
+
+#[test]
 fn buy_walk_approve_then_swap_with_gross_and_fresh_floor() {
     fake_host::install(host_for_barc_buy());
     let body = buy_body("buy-1", "25", json!({"allow_worse_venue": true}));
@@ -863,7 +944,7 @@ fn buy_walk_approve_then_swap_with_gross_and_fresh_floor() {
     assert_eq!(rec["next_action"], "confirm_in_bloom");
     assert_eq!(
         rec["confirm_path"],
-        "wallets/main/chains/arc/outbox/pending/ob-1/confirm"
+        "wallets/main/0/chains/arc/outbox/pending/ob-1/confirm"
     );
     assert_eq!(rec["wallet_address"], addr_hex(wallet_address()));
     assert_eq!(
@@ -1456,7 +1537,7 @@ fn reverted_swap_is_retried_with_a_superseded_attempt() {
     assert_eq!(rec["status"], "staged");
     assert_eq!(
         rec["confirm_path"],
-        "wallets/main/chains/arc/outbox/pending/ob-2/confirm"
+        "wallets/main/0/chains/arc/outbox/pending/ob-2/confirm"
     );
     assert_eq!(rec["confirm_path_note"], crate::tx::MOUNT_NOTE);
     assert_eq!(rec["cancel_hint"], crate::tx::CANCEL_HINT);
@@ -1474,7 +1555,7 @@ fn staged_records_point_at_mount_relative_confirm_paths_with_notes() {
     // `/bloom`, so every emitted path is relative to it and says so.
     assert_eq!(
         rec["confirm_path"],
-        "wallets/main/chains/arc/outbox/pending/ob-1/confirm"
+        "wallets/main/0/chains/arc/outbox/pending/ob-1/confirm"
     );
     assert_eq!(rec["confirm_path_note"], crate::tx::MOUNT_NOTE);
     assert!(
@@ -1705,7 +1786,6 @@ fn buy_description_lists_recent_operations() {
     fake_host::with(|h| assert_eq!(h.inspect_calls, vec!["ob-1".to_string()]));
     assert!(doc["body"]["acknowledge_unrecorded_stage"].is_string());
     assert_eq!(ops::list_ids(WALLET).unwrap(), vec!["buy-d".to_string()]);
-    assert_eq!(ops::list_wallets().unwrap(), vec![WALLET.to_string()]);
 }
 
 // ---- reconciliation lives on the staging route ----
@@ -1737,7 +1817,7 @@ fn operation_record_read_is_a_pure_store_projection() {
     assert_eq!(doc["status"], "staged", "the projection never advances");
     assert_eq!(doc["txs"][0]["outcome"], Value::Null);
     let refresh = doc["refresh"].as_str().expect("refresh hint");
-    assert!(refresh.contains("wallets/main/buy.json"), "{refresh}");
+    assert!(refresh.contains("wallets/main/0/buy.json"), "{refresh}");
     assert!(refresh.contains("cached projection"), "{refresh}");
     fake_host::with(|h| {
         assert_eq!(h.store_writes(), writes, "a record read never saves");
@@ -1764,6 +1844,23 @@ fn operation_record_read_is_a_pure_store_projection() {
     let doc = read_json(ops::read_operation(WALLET, "buy-p"));
     assert_eq!(doc["status"], "confirmed");
     assert_eq!(doc["next_action"], "repost");
+}
+
+#[test]
+fn operation_projection_preserves_stored_confirm_paths() {
+    let mut op = seeded_staged(Kind::Buy, "old-buy", "ob-old", NOW);
+    let old_path = "wallets/main/chains/arc/outbox/pending/ob-old/confirm";
+    op.confirm_path = Some(old_path.into());
+    op.txs[0].confirm_path = old_path.into();
+    let mut host = FakeHost::new(NOW);
+    host.seed_state(&ops::store_key(WALLET, "old-buy"), &op);
+    fake_host::install(host);
+    let before = record("old-buy");
+    let doc = read_json(ops::read_operation(WALLET, "old-buy"));
+    assert_eq!(doc["confirm_path"], old_path);
+    assert_eq!(doc["txs"][0]["confirm_path"], old_path);
+    assert_eq!(record("old-buy"), before, "the legacy record stays intact");
+    fake_host::with(|h| assert_eq!(h.store_writes(), 0));
 }
 
 #[test]
@@ -2430,7 +2527,7 @@ fn no_route_file_touches_the_secret_namespace() {
     }
     let mut files = Vec::new();
     walk(&root, &mut files);
-    assert_eq!(files.len(), 21, "expected route count");
+    assert_eq!(files.len(), 22, "expected route count");
     for file in files {
         let source = std::fs::read_to_string(&file).unwrap();
         for forbidden in [

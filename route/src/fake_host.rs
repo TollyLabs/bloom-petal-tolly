@@ -247,6 +247,11 @@ impl FakeHost {
         self
     }
 
+    pub fn remove_vfs(&mut self, path: &str) -> &mut Self {
+        self.vfs.remove(path);
+        self
+    }
+
     pub fn set_setting(&mut self, key: &str, value: &str) -> &mut Self {
         self.settings.insert(key.to_owned(), value.to_owned());
         self
