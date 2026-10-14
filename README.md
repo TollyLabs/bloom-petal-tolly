@@ -18,11 +18,11 @@ Select a wallet and numbered account under `/petals/tolly/wallets/<wallet>/<inde
 
 `[wallet]` and adjacent `[index]` are explicit route captures. Bloom resolves them against the live core wallet projection and supplies trusted `bloom.wallet` and `bloom.account` context. Every numbered account, including 0, has a separate private store. Legacy unnumbered settings and sessions are not carried into account 0. The core wallet tree remains `/wallets/<wallet>/<index>/`.
 
-This HD-account release requires a Machine with scoped Petal routing and trusted `bloom.wallet`/`bloom.account` parameters. Installing it early on an older Machine removes Tolly wallet operations from that host. Pin it only with the Machine release that provides those parameters.
+This HD-account release requires Bloom v0.3.2 or later, whose Machine provides scoped Petal routing and trusted `bloom.wallet`/`bloom.account` parameters. Installing it early on an older Machine removes Tolly wallet operations from that host. Pin it only with the Machine release that provides those parameters.
 
 ## Quickstart (Bloom owner)
 
-Requires a running Bloom (v0.2.1 or later) with the `arc` chain configured
+Requires a running Bloom (v0.3.2 or later) with the `arc` chain configured
 and a passkey wallet (`main` below). The mount root is the owner's mount point,
 `~/bloom` on a default Linux install.
 
@@ -81,7 +81,7 @@ The four destinations are everything this Petal ever stages a transaction
 to: USDC (`0x3600…`, exact-amount approvals), Uniswap SwapRouter02
 (`0x53bf…`, pad-token swaps), TollyPad (`0xcad7…`, launches) and the TOLLY
 multi router (`0xf28c…`, external-token swaps). Replace the placeholder with
-the hash from step 3 (keep any other package hashes you rely on). Then run
+the hash from step 2 (keep any other package hashes you rely on). Then run
 the policy ceremony:
 
 ```sh
@@ -115,6 +115,29 @@ the same body after the approve mined); a pad-token buy or a sell without an
 allowance is the same. To abandon a pending entry write `cancel` into the
 same `confirm` file. Start with a 1 USDC buy.
 
+## Upgrading from v0.2.0
+
+1. Before replacing the installed Petal, finish and reconcile pending operations
+   with the old build, or have the owner cancel pending entries and reconcile
+   those cancellations. Retain the old package and private records until recovery
+   is complete; a new route/package cannot inspect entries staged by the old one.
+   If the old build cannot run on the installed Bloom version, inspect its entries
+   through the core wallet outbox and resolve them before starting new operations.
+2. Upgrade Bloom to v0.3.2 or later before installing this release. Bloom v0.3.0
+   and v0.3.1 do not provide the trusted account context these routes require.
+3. Install the release archive and approve its installed package hash in the
+   wallet policy as described in the quickstart.
+4. Update agent instructions and scripts from
+   `petals/tolly/wallets/<wallet>/buy.json` to
+   `petals/tolly/wallets/<wallet>/<index>/buy.json` (for example, `main/0`).
+   Use the same numbered prefix for sell, launch, positions and operation records.
+   Public markets, tokens, quotes and status stay at the Petal root.
+
+Core wallet custody and outbox entries remain intact. Legacy unnumbered operation
+state is not automatically imported into account 0. Modern numbered account stores
+can carry forward through signed package lineage; this does not migrate legacy
+state or let a changed staging route reconcile an old entry.
+
 ## Layout
 
 ```
@@ -133,7 +156,7 @@ route/src/
   tx.rs swap.rs launch.rs positions.rs wallet.rs   the write/step flows
   host.rs                the only host seam; fake_host.rs under cfg(test)
   route_tests.rs         fake-host tests of every route flow (cfg(test))
-route/files/             19 route files, one component each (see AGENTS.md table)
+route/files/             22 route files, one component each (see AGENTS.md table)
 route/tests/fixtures/    production API captures, calldata golden vectors
 chain/arc.testnet.json   vendored copy of public/testnet.json (digest in constants.rs)
 scripts/                 build.sh, check-route-architecture.sh, generators
@@ -158,7 +181,7 @@ The SDK is pinned to `bloom-directory/petal` rev
 `73c5b06a77599368fbc79fb7947a629b5b4c630e` in `petal-build.toml`,
 `route/Cargo.toml` and `scripts/build.sh`; `build.sh` refuses drift.
 
-Expected route count: 21.
+Expected route count: 22.
 
 ### Generators (commit their output)
 
@@ -495,8 +518,5 @@ No test contacts a network or a Bloom daemon.
   `cancelled` / `retryable: true` on the next `buy.json` read. Not yet
   exercised live: a confirmed approve + swap (needs the wallet policy's
   destinations allowlist), launches, sells.
-- Release workflow (`release-petal.yml`, `expected-route-count: 21`) and the
+- Release workflow (`release-petal.yml`, `expected-route-count: 22`) and the
   GitHub extraction (`git subtree split -P petals/tolly`).
-
-
-Before upgrading from routes without `[index]`, finish and reconcile pending operations using the installed build. Retain its package and private records until recovery is complete; do not delete them. A new route/package cannot inspect outbox entries staged by the old route/package. Core wallet custody and outbox entries remain intact. Modern numbered account stores are carried through signed package lineage; the legacy unnumbered store is not automatically imported.
