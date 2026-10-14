@@ -55,6 +55,9 @@ a silent write as a staged transaction.
 
 ## Account-scoped routes
 
+Requires Bloom v0.3.2 or later. Bloom v0.3.0 and v0.3.1 do not supply the
+trusted account context required by these routes.
+
 Select a wallet and numbered account under `/petals/tolly/wallets/<wallet>/<index>/` for buy, sell, launch, operations and positions. Markets, tokens, quotes, status and documentation remain at the Petal root.
 
 `[wallet]` and adjacent `[index]` are explicit route captures. Bloom resolves them against the live core wallet projection and supplies trusted `bloom.wallet` and `bloom.account` context. Every numbered account, including 0, has a separate private store. Legacy unnumbered settings and sessions are not carried into account 0. The core wallet tree remains `/wallets/<wallet>/<index>/`.
@@ -400,7 +403,7 @@ it under.
 - Bloom's wallet policy can deny or hard-fail a stage (MEV guard, USD caps
   without a price for Arc tokens). A fresh Bloom wallet allows NO
   destinations and NO Petal packages: until the owner has run the policy
-  update in README.md ("Quickstart", step 4) every staged entry shows
+  update in README.md ("Quickstart", step 3) every staged entry shows
   `[Deny] allowlists.recipients` in its plan and cannot be confirmed. The
   owner repeats that update after every reinstall of this Petal (the package
   hash changes). Test a 1-USDC buy on a throwaway wallet under the owner's
