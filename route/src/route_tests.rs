@@ -2527,7 +2527,7 @@ fn no_route_file_touches_the_secret_namespace() {
     }
     let mut files = Vec::new();
     walk(&root, &mut files);
-    assert_eq!(files.len(), 22, "expected route count");
+    assert_eq!(files.len(), 46, "expected route count");
     for file in files {
         let source = std::fs::read_to_string(&file).unwrap();
         for forbidden in [

@@ -109,36 +109,40 @@ impl ApiError {
     }
 }
 
-/// GET one of the fixed routes and parse the JSON body.
-pub fn fetch_json(network: Network, route: &ApiRoute) -> Result<Value, ApiError> {
+/// GET a fixed URL through the host: the status and the body, or a
+/// sanitized transport error. Shared by every fixed-target client in this
+/// crate (`api` and `agentic`); callers never pass a URL they did not build
+/// from a constant base and a typed route.
+pub fn http_get(url: String, max_bytes: usize) -> Result<(u16, Vec<u8>), String> {
     let request = HttpRequest {
         method: "GET".into(),
-        url: route.url(network),
+        url,
         headers: vec![("accept".into(), "application/json".into())],
         body: Vec::new(),
     };
-    let response = match host::http_fetch(&request, route.max_bytes()) {
-        Ok(response) => response,
+    match host::http_fetch(&request, max_bytes) {
+        Ok(response) => Ok((response.status, response.body)),
         Err(SdkError::Host(HostStatus::BufferTooSmall { needed })) => {
-            return Err(ApiError::Upstream(format!(
-                "response too large ({needed} bytes)"
-            )));
+            Err(format!("response too large ({needed} bytes)"))
         }
         Err(SdkError::Host(HostStatus::Denied)) => {
-            return Err(ApiError::Upstream(
-                "request denied by the host network policy".into(),
-            ));
+            Err("request denied by the host network policy".into())
         }
-        Err(e) => return Err(ApiError::Upstream(sanitize_host_error(&e.message()))),
-    };
-    if response.status == 404 {
+        Err(e) => Err(sanitize_host_error(&e.message())),
+    }
+}
+
+/// GET one of the fixed routes and parse the JSON body.
+pub fn fetch_json(network: Network, route: &ApiRoute) -> Result<Value, ApiError> {
+    let (status, body) =
+        http_get(route.url(network), route.max_bytes()).map_err(ApiError::Upstream)?;
+    if status == 404 {
         return Err(ApiError::NotFound);
     }
-    if !(200..300).contains(&response.status) {
-        return Err(ApiError::Upstream(format!("HTTP {}", response.status)));
+    if !(200..300).contains(&status) {
+        return Err(ApiError::Upstream(format!("HTTP {status}")));
     }
-    serde_json::from_slice(&response.body)
-        .map_err(|_| ApiError::Upstream("body is not JSON".into()))
+    serde_json::from_slice(&body).map_err(|_| ApiError::Upstream("body is not JSON".into()))
 }
 
 // ---- helpers ----
@@ -829,11 +833,15 @@ mod tests {
         }
     }
 
-    /// The manifest declares exactly the host the `Network` reaches.
+    /// The manifest declares exactly the two hosts this Petal reaches: the
+    /// trading API the `Network` names, and the agent exchange (`agentic`).
     #[test]
-    fn manifest_allows_only_the_production_host() {
+    fn manifest_allows_only_the_production_hosts() {
         let manifest = include_str!("../../petal.toml");
-        assert_eq!(manifest.matches("[[net.allow]]").count(), 1);
+        assert_eq!(manifest.matches("[[net.allow]]").count(), 2);
+        assert_eq!(manifest.matches("host = ").count(), 2);
+        assert!(manifest.contains("host = \"agent.tollylabs.com\""));
+        assert!(!manifest.contains("\"POST\""));
         assert!(manifest.contains("host = \"api.tollylabs.com\""));
         let host = Network::current()
             .api_base()

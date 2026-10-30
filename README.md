@@ -4,10 +4,17 @@ A Bloom Petal that exposes the TOLLY launchpad and DEX as virtual files:
 market discovery and token detail from the public TOLLY production API
 (`https://api.tollylabs.com`, the index behind [tollylabs.com](https://tollylabs.com)),
 best-execution quotes across a token's venues from on-chain simulations, and
-buy / sell / launch operations staged into the owner's Bloom outbox. The Petal
+buy / sell / launch operations staged into the owner's Bloom outbox. Since
+v0.3.0 it also reads TOLLY's agentic side, read only: the agent exchange and
+Tolly OS at `https://agent.tollylabs.com` (service catalog and prices,
+routed sellers, agent directory, job board, ACP escrow jobs, agent spending
+rules), with `guide.md` as the navigation map an agent starts from. The Petal
 never signs and never broadcasts: the owner confirms every transaction in
 Bloom with their passkey. Agent-facing semantics live in
-[AGENTS.md](AGENTS.md); the rest of this file is for developers.
+[AGENTS.md](AGENTS.md) and `guide.md` ([docs/GUIDE.md](docs/GUIDE.md)); the
+operator contract for a Claude agent driving Bloom with this Petal is
+[docs/BLOOM_AGENT_GUIDE.md](docs/BLOOM_AGENT_GUIDE.md); release notes are in
+[CHANGELOG.md](CHANGELOG.md); the rest of this file is for developers.
 
 TOLLY runs on Arc mainnet (chain id 5042, Bloom chain key `arc`). Every
 staged transaction spends real USDC once the owner confirms it.
@@ -22,7 +29,8 @@ This HD-account release requires a Machine with scoped Petal routing and trusted
 
 ## Quickstart (Bloom owner)
 
-Requires a running Bloom (v0.2.1 or later) with the `arc` chain configured
+Requires a running Bloom v0.3.2 or later (explicit HD accounts; v0.4.0 is
+current) with the `arc` chain configured
 and a passkey wallet (`main` below). The mount root is the owner's mount point,
 `~/bloom` on a default Linux install.
 
@@ -34,7 +42,7 @@ bloom petals install ./tolly-v<next-version>.petal.tar.gz
 
 The archive and its `SHA256SUMS` are attached to each GitHub release of
 [TollyLabs/bloom-petal-tolly](https://github.com/TollyLabs/bloom-petal-tolly).
-Bloom v0.2.1 installs source repositories only from its own `bloom-directory`
+Bloom installs source repositories only from its own `bloom-directory`
 organisation, so `bloom petals install <github-url> --ref <tag>` works for this
 Petal once Bloom lists it there; until then install the release archive.
 
@@ -43,7 +51,11 @@ Nothing else to configure: the Petal reads production by default. Check it:
 ```sh
 cat ~/bloom/petals/tolly/status.json     # network "prod", api_base "https://api.tollylabs.com", chain_id 5042
 cat ~/bloom/petals/tolly/markets.json
+cat ~/bloom/petals/tolly/guide.md        # the map of every route
+cat ~/bloom/petals/tolly/agentic/os.json # Tolly OS: ACP escrow and spending rules, live or not
 ```
+
+The agentic reads need no wallet policy change: they stage nothing.
 
 **2. Find the installed package hash.** Bloom identifies a Petal build by
 its package hash; a fresh wallet policy allows no Petal packages and no
@@ -120,12 +132,15 @@ same `confirm` file. Start with a 1 USDC buy.
 ```
 petal.toml               package manifest: caps ceiling, net.allow, store policy
 petal-build.toml         route build config; SDK pinned by full commit SHA; no extra crate deps
+docs/GUIDE.md            the navigation map served as guide.md (embedded at build time)
+docs/BLOOM_AGENT_GUIDE.md operator contract for a Claude agent driving Bloom with this Petal
 route/Cargo.toml         shared route crate (same SDK pin)
 route/src/
   constants.rs           GENERATED from the frontend sources (scripts/gen-constants.mjs)
   policy.rs              day-1 transaction limits
   abi.rs amount.rs fee.rs           pure encoders and arithmetic
   api.rs                 fixed API targets (the production host) + projections (venuesForToken port)
+  agentic.rs             agent.tollylabs.com: typed GET routes, id grammars, projections, off states
   chain.rs               the four allowlisted bloom:chain reads
   quote.rs               per-venue quoting, ranking, protection
   ops.rs                 operation record + state machine + reconciliation (run from the staging route's read)
@@ -133,8 +148,9 @@ route/src/
   tx.rs swap.rs launch.rs positions.rs wallet.rs   the write/step flows
   host.rs                the only host seam; fake_host.rs under cfg(test)
   route_tests.rs         fake-host tests of every route flow (cfg(test))
-route/files/             19 route files, one component each (see AGENTS.md table)
-route/tests/fixtures/    production API captures, calldata golden vectors
+  agentic_tests.rs       fake-host tests of every agentic route (cfg(test))
+route/files/             46 route files, one component each (23 under agentic/; see guide.md)
+route/tests/fixtures/    production API + agent exchange captures, synthetic Tolly OS bodies, calldata golden vectors
 chain/arc.testnet.json   vendored copy of public/testnet.json (digest in constants.rs)
 scripts/                 build.sh, check-route-architecture.sh, generators
 ```
@@ -158,7 +174,7 @@ The SDK is pinned to `bloom-directory/petal` rev
 `73c5b06a77599368fbc79fb7947a629b5b4c630e` in `petal-build.toml`,
 `route/Cargo.toml` and `scripts/build.sh`; `build.sh` refuses drift.
 
-Expected route count: 21.
+Expected route count: 46 (CI and the release workflow assert it).
 
 ### Generators (commit their output)
 
@@ -224,6 +240,20 @@ Expected route count: 21.
   record, a marker or a response; no route file references the secret
   namespace).
 
+- Agentic routes (`route/src/agentic_tests.rs`, `agentic::tests`): every
+  route against captures of the public agent-exchange endpoints
+  (`agent-*.json`, 2026-10-29) and, because Tolly OS is not deployed on the
+  gateway yet, gateway-shaped synthetic bodies (`synthetic-*.json`, from the
+  tolly-x402 source) for the live, `not deployed`, `disabled` (503) and
+  `not on this gateway yet` (plain 404) states; exact USDC decimals from
+  atomic units, `latest` per service family, local routed search, untrusted
+  text cleaning (bidi/control characters, caps), id grammars refused before
+  any request, 404/429/503/oversized/non-JSON handling, every request a GET
+  to `agent.tollylabs.com` with no session or payment header and no chain,
+  store or outbox call; the manifest's `tolly-agent` globs (Bloom's glob
+  semantics) cover every typed route and nothing unused; the agentic route
+  files use read-only specs only; `guide.md` maps every route.
+
 No test contacts a network or a Bloom daemon.
 
 ## Decisions (fixed for day-1)
@@ -257,12 +287,14 @@ No test contacts a network or a Bloom daemon.
 - **D9** `max_fee_per_gas` / `max_priority_fee_per_gas` left `None` (the
   TxEngine sets fees and estimates gas); the `eth_call{from}` pre-flight is
   mandatory and a hard refuse (`-4 preflight-reverted`).
-- **D10** One network: the Petal reads `https://api.tollylabs.com` (no
-  `/api` prefix) and nothing else. The host is declared in `petal.toml` as
-  the single `[[net.allow]]` rule (`tolly-prod`) with `GET` and the exact
-  paths it serves (`/health`, `/tokens`, `/token/*`). Bloom matches a fetch
-  against the URL's host, method and PATH only (query strings are not part
-  of the rule; `*` is one path segment). The rule's `binding` lets an
+- **D10** One trading network: the trading routes read
+  `https://api.tollylabs.com` (no `/api` prefix). The host is declared in
+  `petal.toml` as the `[[net.allow]]` rule `tolly-prod` with `GET` and the
+  exact paths it serves (`/health`, `/tokens`, `/token/*`). Since v0.3.0 a
+  second rule, `tolly-agent`, allows `GET` on the public free paths of
+  `agent.tollylabs.com` (D15). Bloom matches a fetch against the URL's host,
+  method and PATH only (query strings are not part of the rule; a trailing
+  `*` is a path PREFIX, an inner `*` exactly one segment). The rule's `binding` lets an
   operator re-point its HTTPS authority only; methods and paths stay. The
   `Network` type is the only source of a base URL; no runtime setting
   selects a host, and a test pins the manifest to the host the route
@@ -295,6 +327,44 @@ No test contacts a network or a Bloom daemon.
   `reconcile_truncated`; `recent` is projected after reconciliation. The
   write handlers reconcile only what they did before (their own record and
   `live_conflict`).
+
+- **D15** The agentic side is read only (v0.3.0). `agentic.rs` builds every
+  URL from `AGENT_API` and a typed `AgentRoute` whose path parameter has
+  passed its grammar (service id, agent id, route id, `jb_` board id, ACP
+  job number, agent NFT UUID); routed search filters the full listing
+  locally, so the term never reaches the gateway. Requests carry no
+  session, account or payment header. Untrusted third-party text is cleaned
+  and capped. Tolly OS off states (`{enabled:false}`, 503 `acp_disabled`,
+  and a plain 404 from a gateway that does not serve the endpoint yet) read
+  as a document with `enabled: false` and `state`, never as an error; a 404
+  that carries a `reason` is an unknown id (`-1`).
+- **D16** No x402 payment from the Petal or through Bloom in v0.3.0 (see
+  "x402 in Bloom" below); prices are shown with `how_to_buy` pointing at the
+  MCP server.
+- **D17** No staged ACP or spending-policy transaction in v0.3.0. Tolly ACP
+  went live on Arc mainnet on 2026-10-29 (`0x75db32f542f981ca4E545A5B35379e3735104a65`)
+  after this release was built; AgentSpendPolicy is not deployed yet. Both were
+  outside this release's scope, and the gateway's `POST /v1/acp/tx/*`
+  builders would put a POST and server-built calldata into the Petal's
+  trust path. When the contract is deployed and audited, the follow-up is
+  to encode `createJob`/`setBudget`/exact `approve`+`fund`/`reject`/
+  `claimRefund` LOCALLY from the pinned ABI (as the trading writes do),
+  pin the address and runtime codehash in the Petal, check the codehash
+  on chain before staging, and add the ACP address to the owner's policy
+  destinations; no POST host is needed.
+
+## x402 in Bloom
+
+- Bloom pays x402 through its core paid HTTP surface (`requests/`): stage a
+  request, read `plan.md`, confirm with the owner's authority, and Bloom signs
+  the EIP-3009 authorization and retries. This Petal never signs; each service
+  file's `how_to_buy.from_bloom` gives the exact request to write.
+- Requires Bloom v0.4.1 or later. Earlier Bloom valued Arc USDC
+  (`0x3600000000000000000000000000000000000000`) as a whole-dollar asset, so a
+  $0.01 quote read as $10,000 and caps refused it; fixed upstream in
+  bloom-directory/bloom#397 (released in v0.4.1).
+- A Petal-side `bloom:sign` path stays deferred: Bloom's own surface already
+  covers it without giving this Petal a signing capability.
 
 ## Host facts the implementation relies on
 
@@ -473,6 +543,13 @@ No test contacts a network or a Bloom daemon.
 
 ## Not implemented (follow-ups)
 
+- Paying for TOLLY services from Bloom (x402): blocked on Bloom pricing Arc
+  USDC: from Bloom v0.4.1 use `requests/` (see "x402 in Bloom"); a
+  Petal-side `bloom:sign` path stays deferred.
+- Staged ACP client actions and spending-policy owner actions (D17).
+- `agentic/receipts/<id>.json` and paid-result recovery: both need a job
+  token, which the Petal does not hold.
+
 - V4 execution (TollyV4Router / UniversalRouter / Permit2 paths).
 - Live smoke of v0.2.0 against production (a 1 USDC buy through the
   production API on Bloom v0.2.1, then a confirmed approve + swap under the
@@ -495,8 +572,10 @@ No test contacts a network or a Bloom daemon.
   `cancelled` / `retryable: true` on the next `buy.json` read. Not yet
   exercised live: a confirmed approve + swap (needs the wallet policy's
   destinations allowlist), launches, sells.
-- Release workflow (`release-petal.yml`, `expected-route-count: 21`) and the
-  GitHub extraction (`git subtree split -P petals/tolly`).
+- The GitHub extraction is done (TollyLabs/bloom-petal-tolly); the release
+  workflow asserts `expected-route-count: 46` since v0.3.0 (it still said
+  19 after the HD-account routes landed, which would have failed a v0.2.x
+  re-release).
 
 
 Before upgrading from routes without `[index]`, finish and reconcile pending operations using the installed build. Retain its package and private records until recovery is complete; do not delete them. A new route/package cannot inspect outbox entries staged by the old route/package. Core wallet custody and outbox entries remain intact. Modern numbered account stores are carried through signed package lineage; the legacy unnumbered store is not automatically imported.

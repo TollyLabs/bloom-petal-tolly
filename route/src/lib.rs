@@ -8,6 +8,7 @@
 //! - `constants` (generated), `policy`: addresses and the day-1 limits.
 //! - `abi`, `amount`, `fee`: pure encoders and arithmetic.
 //! - `api`: the TOLLY public API (fixed hosts/paths) and its projections.
+//! - `agentic`: the agent exchange and Tolly OS at agent.tollylabs.com, read only.
 //! - `chain`: the four allowlisted `bloom:chain` reads, sanitized.
 //! - `quote`: best-execution quoting across a token's venues.
 //! - `ops`: the durable operation record and its state machine.
@@ -18,6 +19,7 @@
 
 pub mod abi;
 pub mod account;
+pub mod agentic;
 pub mod amount;
 pub mod api;
 pub mod chain;
@@ -35,6 +37,8 @@ pub mod trace;
 pub mod tx;
 pub mod wallet;
 
+#[cfg(test)]
+mod agentic_tests;
 #[cfg(test)]
 mod constants_tests;
 #[cfg(test)]

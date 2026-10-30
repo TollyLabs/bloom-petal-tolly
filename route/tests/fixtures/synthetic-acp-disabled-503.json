@@ -1,0 +1,4 @@
+{
+ "error": "acp_disabled",
+ "reason": "Tolly ACP is not enabled on this gateway yet (no contract address published)."
+}

@@ -1,0 +1,36 @@
+{
+ "enabled": true,
+ "standard": "ERC-8183",
+ "address": "0x1111111111111111111111111111111111111111",
+ "chainId": 5042,
+ "network": "eip155:5042",
+ "startBlock": "30000000",
+ "codehash": "0xabababababababababababababababababababababababababababababababab",
+ "token": {
+  "address": "0x3600000000000000000000000000000000000000",
+  "symbol": "USDC",
+  "decimals": 6
+ },
+ "fees": {
+  "platformBp": 500,
+  "evaluatorBp": 0,
+  "chargedOn": "completion only",
+  "treasury": "0x2222222222222222222222222222222222222222"
+ },
+ "admin": "0x3333333333333333333333333333333333333333",
+ "hooksAllowed": [],
+ "limits": {
+  "minExpirySeconds": 300,
+  "maxExpirySeconds": 31536000,
+  "descriptionMaxBytes": 1024,
+  "contractDescriptionMaxBytes": 4096,
+  "maxBudgetAtomic": "1000000000",
+  "gracePeriodSeconds": 0
+ },
+ "reputation": {
+  "enabled": false,
+  "minWeightBudgetAtomic": "1000000"
+ },
+ "indexedTo": "30001234",
+ "note": "Unsigned transactions only: TOLLY never signs or sends."
+}
