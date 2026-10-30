@@ -6,12 +6,12 @@ command = "scripts/build.sh"
 outputs = ["petal/tolly"]
 
 [consent]
-summary = "Read TOLLY launchpad and DEX markets on Arc from the public production API (api.tollylabs.com), quote best execution across a token's venues, and stage buy, sell and token-launch transactions for the wallet owner to confirm in Bloom. The Petal never signs and never broadcasts; every transaction is confirmed by the owner in Bloom's outbox with their passkey."
+summary = "Read TOLLY launchpad and DEX markets on Arc from the public production API (api.tollylabs.com), quote best execution across a token's venues, and stage buy, sell and token-launch transactions for the wallet owner to confirm in Bloom. Also read TOLLY's agent exchange at agent.tollylabs.com (service catalog and prices, routed sellers, agent directory, job board, Tolly OS escrow jobs and agent spending rules) with GET requests only: it never pays for a service, posts a job or changes spending rules. The Petal never signs and never broadcasts; every transaction is confirmed by the owner in Bloom's outbox with their passkey."
 
 [caps]
 allowed = ["bloom:http", "bloom:store", "bloom:tx.outbox", "bloom:chain", "bloom:vfs.read"]
 
-# The public production API host, the only host this Petal reaches. Paths
+# The public production trading API host. Paths
 # are matched on the URL path only (query strings are not part of the
 # rule): GET /health, GET /tokens?..., GET /token/<address>. The binding lets
 # an operator re-point the HTTPS authority only; methods and paths stay.
@@ -20,6 +20,33 @@ binding = "tolly-prod"
 host = "api.tollylabs.com"
 methods = ["GET"]
 paths = ["/health", "/tokens", "/token/*"]
+
+# TOLLY's agent exchange and Tolly OS, read only: GET on the public free
+# endpoints. Bloom's globs treat a trailing `*` as a PREFIX and an inner `*`
+# as one segment, so `/v1/routed/*` also covers `/v1/routed/<id>/invoke` (a
+# paid x402 endpoint): route code never builds such a URL (every URL comes
+# from a typed route whose parameter is validated first) and never sends a
+# payment or session header, so a stray GET there could only answer 402/401.
+[[net.allow]]
+binding = "tolly-agent"
+host = "agent.tollylabs.com"
+methods = ["GET"]
+paths = [
+  "/v1/exchange/stats",
+  "/v1/agents",
+  "/v1/agents/*",
+  "/v1/services",
+  "/v1/services/*",
+  "/v1/routed",
+  "/v1/routed/*",
+  "/v1/jobs",
+  "/v1/jobs/*",
+  "/v1/acp",
+  "/v1/acp/jobs",
+  "/v1/acp/jobs/*",
+  "/v1/spend-policy",
+  "/v1/nft-agents/*/policy",
+]
 
 [store]
 namespaces = ["state"]

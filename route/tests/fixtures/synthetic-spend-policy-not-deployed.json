@@ -1,0 +1,5 @@
+{
+ "enabled": false,
+ "status": "not deployed",
+ "note": "AgentSpendPolicy (on-chain spending rules for agent wallets) is built but not deployed yet. This answer names the contract once it is."
+}

@@ -1,0 +1,42 @@
+{
+ "enabled": true,
+ "policy": "0x6666666666666666666666666666666666666666",
+ "chainId": 5042,
+ "account": "0x7777777777777777777777777777777777777777",
+ "tollyPayee": "0x4caf61991132b7a55d25b85583b203c807407e84",
+ "acp": "0x1111111111111111111111111111111111111111",
+ "defaults": {
+  "perTxCapAtomic": "2000000",
+  "dailyCapAtomic": "10000000"
+ },
+ "hotKey": "0x8888888888888888888888888888888888888888",
+ "status": "active",
+ "statusText": "Active: the hot key spends within the caps below.",
+ "owner": "0x9999999999999999999999999999999999999999",
+ "permitted": true,
+ "locked": false,
+ "config": {
+  "writtenBy": "0x9999999999999999999999999999999999999999",
+  "accepted": true,
+  "paused": false,
+  "expiresAt": null,
+  "allowNative": false,
+  "allowPreauth": true,
+  "perTxCapAtomic": "2000000",
+  "dailyCapAtomic": "10000000",
+  "spentTodayAtomic": "250000",
+  "remainingTodayAtomic": "9750000"
+ },
+ "payees": [
+  {
+   "address": "0x4caf61991132b7a55d25b85583b203c807407e84",
+   "allowed": true
+  },
+  {
+   "address": "0x1111111111111111111111111111111111111111",
+   "allowed": true
+  }
+ ],
+ "generation": "1",
+ "readAt": "2026-10-29T12:00:00.000Z"
+}

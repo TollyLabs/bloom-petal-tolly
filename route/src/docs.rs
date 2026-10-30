@@ -5,3 +5,5 @@
 
 pub const README_MD: &str = include_str!("../../README.md");
 pub const AGENTS_MD: &str = include_str!("../../AGENTS.md");
+/// The navigation map served as `guide.md` (every route, trading and agentic).
+pub const GUIDE_MD: &str = include_str!("../../docs/GUIDE.md");

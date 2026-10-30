@@ -1,0 +1,18 @@
+{
+ "enabled": true,
+ "address": "0x6666666666666666666666666666666666666666",
+ "codehash": "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+ "chainId": 5042,
+ "network": "eip155:5042",
+ "token": {
+  "address": "0x3600000000000000000000000000000000000000",
+  "decimals": 6
+ },
+ "tollyPayee": "0x4caf61991132b7a55d25b85583b203c807407e84",
+ "acp": "0x1111111111111111111111111111111111111111",
+ "defaults": {
+  "perTxCapAtomic": "2000000",
+  "dailyCapAtomic": "10000000"
+ },
+ "leakBound": "At most 3 x the daily cap can move in any rolling 24 hours, only to allowlisted counterparties."
+}
